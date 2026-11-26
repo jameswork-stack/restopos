@@ -23,20 +23,33 @@ function Dashboard() {
   // DASHBOARD TOTALS
   // =========================================
 
-  const [totalCostOfGoodsSold, setTotalCostOfGoodsSold] =
-    useState(0);
+  // Get current date in Philippine time
+const today = new Date().toLocaleDateString("en-CA", {
+  timeZone: "Asia/Manila",
+});
 
-  const [totalExpenses, setTotalExpenses] =
-    useState(0);
+// Get first day of the current month
+const firstDayOfMonth = `${today.slice(0, 7)}-01`;
 
-  const [totalSales, setTotalSales] =
-    useState(0);
+// Default date filter
+const [dateFrom, setDateFrom] = useState(firstDayOfMonth);
+const [dateTo, setDateTo] = useState(today);
 
-  const [totalProfit, setTotalProfit] =
-    useState(0);
+  const [expensesData, setExpensesData] = useState([]);
+  const [summarySalesData, setSummarySalesData] = useState([]);
 
-  const [totalGcash, setTotalGcash] =
-    useState(0);
+  // Philippine calendar date, independent of the browser timezone.
+  const getDateKey = (timestamp) => {
+    if (timestamp == null) return null;
+    const date = typeof timestamp.toDate === "function"
+      ? timestamp.toDate() : new Date(timestamp);
+    if (Number.isNaN(date.getTime())) return null;
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit",
+    }).formatToParts(date);
+    const part = (type) => parts.find((p) => p.type === type)?.value;
+    return `${part("year")}-${part("month")}-${part("day")}`;
+  };
 
   // =========================================
   // STOCK ALERTS
@@ -167,19 +180,10 @@ function Dashboard() {
         collection(db, "expenses")
       );
 
-      let expenseAmount = 0;
-
-      expensesSnapshot.forEach((expenseDoc) => {
-        const expense =
-          expenseDoc.data();
-
-        expenseAmount +=
-          Number(expense.amount) || 0;
-      });
-
-      setTotalExpenses(
-        expenseAmount
-      );
+      setExpensesData(expensesSnapshot.docs.map((record) => {
+        const expense = record.data();
+        return { amount: Number(expense.amount) || 0, dateKey: getDateKey(expense.createdAt) };
+      }));
 
       // =========================================
       // LOAD SALES
@@ -189,41 +193,22 @@ function Dashboard() {
         collection(db, "saleActivity")
       );
 
-      let salesAmount = 0;
-      let profitAmount = 0;
-      let gcashAmount = 0;
-      let costOfGoodsSoldAmount = 0;
+      setSummarySalesData(salesSnapshot.docs.map((record) => {
+        const sale = record.data();
+        return {
+          total: Number(sale.total) || 0,
+          costOfGoodsSold: Number(sale.costOfGoodsSold) || 0,
+          profit: Number(sale.profit) || 0,
+          gcashAmount: Number(sale.gcashAmount) || 0,
+          dateKey: getDateKey(sale.createdAt),
+        };
+      }));
 
       const loadedSales = [];
 
       salesSnapshot.forEach((saleDoc) => {
         const sale =
           saleDoc.data();
-
-        // -----------------------------------------
-        // TOTAL SALES
-        // -----------------------------------------
-
-        salesAmount +=
-          Number(sale.total) || 0;
-
-        // TOTAL COST OF GOODS SOLD
-        costOfGoodsSoldAmount +=
-          Number(sale.costOfGoodsSold) || 0;
-
-        // -----------------------------------------
-        // TOTAL PROFIT
-        // -----------------------------------------
-
-        profitAmount +=
-          Number(sale.profit) || 0;
-
-        // -----------------------------------------
-        // TOTAL GCASH
-        // -----------------------------------------
-
-        gcashAmount +=
-          Number(sale.gcashAmount) || 0;
 
         // -----------------------------------------
         // SAVE SALE FOR GRAPH
@@ -262,20 +247,6 @@ function Dashboard() {
           });
         }
       });
-
-      setTotalCostOfGoodsSold(costOfGoodsSoldAmount);
-
-      setTotalSales(
-        salesAmount
-      );
-
-      setTotalProfit(
-        profitAmount
-      );
-
-      setTotalGcash(
-        gcashAmount
-      );
 
       setSalesData(
         loadedSales
@@ -507,6 +478,29 @@ function Dashboard() {
     return [];
   };
 
+  const invalidRange = Boolean(dateFrom && dateTo && dateFrom > dateTo);
+  const matchesSummaryDate = ({ dateKey }) => {
+    if (invalidRange) return false;
+    if (!dateFrom && !dateTo) return true;
+    if (!dateKey) return false;
+    return (!dateFrom || dateKey >= dateFrom) &&
+      (!dateTo || dateKey <= dateTo);
+  };
+
+  const totals = summarySalesData.filter(matchesSummaryDate).reduce(
+    (acc, sale) => ({
+      totalSales: acc.totalSales + sale.total,
+      totalCostOfGoodsSold: acc.totalCostOfGoodsSold + sale.costOfGoodsSold,
+      totalGrossProfit: acc.totalGrossProfit + sale.profit,
+      totalGcash: acc.totalGcash + sale.gcashAmount,
+    }),
+    { totalSales: 0, totalCostOfGoodsSold: 0, totalGrossProfit: 0, totalGcash: 0 }
+  );
+  const { totalSales, totalCostOfGoodsSold, totalGrossProfit, totalGcash } = totals;
+  const totalExpenses = expensesData.filter(matchesSummaryDate)
+    .reduce((sum, expense) => sum + expense.amount, 0);
+  const totalNetProfit = totalGrossProfit - totalExpenses;
+
   const filteredSales =
     getFilteredSales();
 
@@ -593,6 +587,37 @@ function Dashboard() {
           DASHBOARD CARDS
       ====================================== */}
 
+      <section className="dashboard-summary-filter" aria-label="Financial summary date filter">
+        <div className="dashboard-summary-filter-heading">
+          <h2>Financial Summary</h2>
+          <p>{dateFrom || dateTo ? "Selected date range (Philippine time)" : "All-time records"}</p>
+        </div>
+        <div className="dashboard-summary-filter-controls">
+          <label>
+            Date From
+            <input type="date" value={dateFrom} max={dateTo || undefined}
+              onChange={(event) => setDateFrom(event.target.value)} />
+          </label>
+          <label>
+            Date To
+            <input type="date" value={dateTo} min={dateFrom || undefined}
+              onChange={(event) => setDateTo(event.target.value)} />
+          </label>
+          <button
+            type="button"
+            onClick={() => {
+              setDateFrom(firstDayOfMonth);
+              setDateTo(today);
+            }}
+          >
+            Reset Filter
+          </button>
+        </div>
+        {invalidRange && <p role="alert" className="dashboard-summary-filter-error">
+          Date From must be on or before Date To.
+        </p>}
+      </section>
+
       <div className="dashboard-cards">
 
         {/* =====================================
@@ -612,7 +637,7 @@ function Dashboard() {
             </span>
 
             <strong>
-              {loading
+              {invalidRange ? "—" : loading
                 ? "Loading..."
                 : formatCurrency(
                     totalCostOfGoodsSold
@@ -640,7 +665,7 @@ function Dashboard() {
             </span>
 
             <strong>
-              {loading
+              {invalidRange ? "—" : loading
                 ? "Loading..."
                 : formatCurrency(
                     totalSales
@@ -668,7 +693,7 @@ function Dashboard() {
             </span>
 
             <strong>
-              {loading
+              {invalidRange ? "—" : loading
                 ? "Loading..."
                 : formatCurrency(
                     totalGcash
@@ -680,7 +705,7 @@ function Dashboard() {
         </div>
 
         {/* =====================================
-            TOTAL PROFIT
+            TOTAL GROSS PROFIT
         ====================================== */}
 
         <div className="dashboard-card">
@@ -692,14 +717,14 @@ function Dashboard() {
           <div className="dashboard-card-content">
 
             <span>
-              Total Profit
+              Total Gross Profit
             </span>
 
             <strong className="dashboard-profit">
-              {loading
+              {invalidRange ? "—" : loading
                 ? "Loading..."
                 : formatCurrency(
-                    totalProfit
+                    totalGrossProfit
                   )}
             </strong>
 
@@ -724,7 +749,7 @@ function Dashboard() {
             </span>
 
             <strong>
-              {loading
+              {invalidRange ? "—" : loading
                 ? "Loading..."
                 : formatCurrency(
                     totalExpenses
@@ -733,6 +758,20 @@ function Dashboard() {
 
           </div>
 
+        </div>
+
+        {/* TOTAL NET PROFIT */}
+        <div className="dashboard-card">
+          <div className="dashboard-card-icon">₱</div>
+          <div className="dashboard-card-content">
+            <span>Total Net Profit</span>
+            <strong
+              className="dashboard-profit"
+              style={totalNetProfit < 0 ? { color: "#dc2626" } : undefined}
+            >
+              {invalidRange ? "—" : loading ? "Loading..." : formatCurrency(totalNetProfit)}
+            </strong>
+          </div>
         </div>
 
       </div>

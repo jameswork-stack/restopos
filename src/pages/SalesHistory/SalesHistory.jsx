@@ -14,7 +14,24 @@ import { db } from "../../firebase/config";
 import "./salesHistory.css";
 
 
+// Calendar dates in Philippine time, independent of the device timezone.
+const manilaDate = (date) => {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Manila",
+    year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(date);
+  const get = (type) => parts.find((part) => part.type === type).value;
+  return `${get("year")}-${get("month")}-${get("day")}`;
+};
+
+const getCurrentMonth = () => {
+  const today = manilaDate(new Date());
+  return { from: `${today.slice(0, 7)}-01`, to: today };
+};
+
 function SalesHistory() {
+  const [dateFrom, setDateFrom] = useState(() => getCurrentMonth().from);
+  const [dateTo, setDateTo] = useState(() => getCurrentMonth().to);
   const [sales, setSales] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -70,7 +87,18 @@ function SalesHistory() {
   // ---------------------------------------
   // TOTAL TRANSACTIONS
   // ---------------------------------------
-  const totalTransactions = sales.length;
+  const invalidRange = Boolean(dateFrom && dateTo && dateFrom > dateTo);
+  const filteredSales = sales.filter((sale) => {
+    if (invalidRange) return false;
+    if (!dateFrom && !dateTo) return true;
+    if (!sale.createdAt) return false;
+    const date = typeof sale.createdAt.toDate === "function"
+      ? sale.createdAt.toDate() : new Date(sale.createdAt);
+    if (Number.isNaN(date.getTime())) return false;
+    const day = manilaDate(date);
+    return (!dateFrom || day >= dateFrom) && (!dateTo || day <= dateTo);
+  });
+  const totalTransactions = filteredSales.length;
 
   // ---------------------------------------
   // FORMAT DATE
@@ -86,6 +114,7 @@ function SalesHistory() {
         : new Date(timestamp);
 
     return date.toLocaleString("en-PH", {
+      timeZone: "Asia/Manila",
       year: "numeric",
       month: "short",
       day: "numeric",
@@ -263,6 +292,31 @@ function SalesHistory() {
       {/* =====================================
           SUMMARY
       ====================================== */}
+      <div className="sales-date-filter">
+        <div className="sales-date-heading">
+          <h2>Filter Transactions</h2>
+          <p>Select a date range (Philippine time).</p>
+        </div>
+        <div className="sales-date-controls">
+          <label>Date From
+            <input type="date" value={dateFrom} max={dateTo || undefined}
+              onChange={(event) => { setDateFrom(event.target.value); setMenu(null); }} />
+          </label>
+          <label>Date To
+            <input type="date" value={dateTo} min={dateFrom || undefined}
+              onChange={(event) => { setDateTo(event.target.value); setMenu(null); }} />
+          </label>
+          <button type="button" onClick={() => {
+            const { from, to } = getCurrentMonth();
+            setDateFrom(from); setDateTo(to); setMenu(null);
+          }}>Reset Filter</button>
+          <button type="button" onClick={() => {
+            setDateFrom(""); setDateTo(""); setMenu(null);
+          }}>All Dates</button>
+        </div>
+        {invalidRange && <p className="sales-date-error" role="alert">Date From must not be after Date To.</p>}
+      </div>
+
       <div className="sales-summary">
 
         {/* TOTAL TRANSACTIONS */}
@@ -311,16 +365,16 @@ function SalesHistory() {
             <p>Loading sales history...</p>
           </div>
 
-        ) : sales.length === 0 ? (
+        ) : filteredSales.length === 0 ? (
 
           /* EMPTY */
           <div className="sales-history-empty">
             <div className="empty-sales-icon">₱</div>
 
-            <h3>No sales yet</h3>
+            <h3>{sales.length === 0 ? "No sales yet" : "No matching transactions"}</h3>
 
             <p>
-              Completed sales will appear here.
+              {sales.length === 0 ? "Completed sales will appear here." : "Try a different date range."}
             </p>
           </div>
 
@@ -329,7 +383,7 @@ function SalesHistory() {
           /* SALES LIST */
           <div className="sales-history-list">
 
-            {sales.map((sale) => (
+            {filteredSales.map((sale) => (
               <div
                 className="sale-history-item"
                 key={sale.id}

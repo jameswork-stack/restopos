@@ -164,7 +164,7 @@ const handlePaymentConfirmation = () => {
 
 
 
-const openQuantityModal = (item) => { const product = products.find( (product) => String(product.productId).trim().toLowerCase() === String(item.productId).trim().toLowerCase() ); if (!product) { alert("Product information could not be found."); return; } const currentStock = Number(product.stock) || 0; setQuantityModal({ productId: item.productId, productName: item.productName, currentStock, }); setQuantityValue(String(item.quantity)); }; const closeQuantityModal = () => { setQuantityModal(null); setQuantityValue(""); }; const handleSetQuantity = () => { if (!quantityModal) { return; } const quantity = Number(quantityValue); const currentStock = Number(quantityModal.currentStock) || 0; if (!quantityValue || !Number.isInteger(quantity)) { alert("Please enter a whole number."); return; } if (quantity < 1) { alert("Quantity must be at least 1."); return; } if (currentStock <= 0) { alert("This product is currently out of stock."); return; } if (quantity > currentStock) { alert( `You cannot set the quantity to ${quantity}. Only ${currentStock} item(s) are currently in stock.` ); return; } setQuantity( quantityModal.productId, quantity ); closeQuantityModal(); setMessage( `Quantity updated to ${quantity}.` ); setMessageType("success"); };
+const openQuantityModal = (item) => { const product = products.find( (product) => String(product.productId).trim().toLowerCase() === String(item.productId).trim().toLowerCase() ); if (!product) { alert("Product information could not be found."); return; } const currentStock = Number(product.stock) || 0; setQuantityModal({ productId: item.productId, productName: item.productName, currentStock, trackStock: product.trackStock !== false, }); setQuantityValue(String(item.quantity)); }; const closeQuantityModal = () => { setQuantityModal(null); setQuantityValue(""); }; const handleSetQuantity = () => { if (!quantityModal) { return; } const quantity = Number(quantityValue); const currentStock = Number(quantityModal.currentStock) || 0; if (!quantityValue || !Number.isInteger(quantity)) { alert("Please enter a whole number."); return; } if (quantity < 1) { alert("Quantity must be at least 1."); return; } if (quantityModal.trackStock && currentStock <= 0) { alert("This product is currently out of stock."); return; } if (quantityModal.trackStock && quantity > currentStock) { alert( `You cannot set the quantity to ${quantity}. Only ${currentStock} item(s) are currently in stock.` ); return; } setQuantity( quantityModal.productId, quantity ); closeQuantityModal(); setMessage( `Quantity updated to ${quantity}.` ); setMessageType("success"); };
 
   // =========================
   // GET CURRENT USER INFO
@@ -371,6 +371,7 @@ const completeSaleWithPayment = async ({
 
           const productData =
             productSnapshot.data();
+          const trackStock = productData.trackStock !== false;
 
           // ==========================================
           // CURRENT PRODUCT VALUES
@@ -395,6 +396,7 @@ const completeSaleWithPayment = async ({
           */
 
           const currentCostPerItem =
+            !trackStock ? Number(productData.costPerItem ?? productData.productCost ?? 0) :
             Number(productData.costPerItem) ||
             (
               currentStock > 0
@@ -409,7 +411,7 @@ const completeSaleWithPayment = async ({
           // VALIDATE QUANTITY
           // ==========================================
 
-          if (saleQuantity <= 0) {
+          if (!Number.isSafeInteger(saleQuantity) || saleQuantity <= 0) {
             throw new Error(
               `Invalid quantity for "${item.productName}".`
             );
@@ -419,7 +421,7 @@ const completeSaleWithPayment = async ({
           // CHECK STOCK
           // ==========================================
 
-          if (currentStock < saleQuantity) {
+          if (trackStock && currentStock < saleQuantity) {
             throw new Error(
               `Not enough stock for "${item.productName}". Available: ${currentStock}, requested: ${saleQuantity}.`
             );
@@ -443,7 +445,7 @@ const completeSaleWithPayment = async ({
           // ==========================================
 
           const newStock =
-            currentStock - saleQuantity;
+            trackStock ? currentStock - saleQuantity : currentStock;
 
           /*
             Remove the cost of the sold items
@@ -451,7 +453,7 @@ const completeSaleWithPayment = async ({
           */
 
           let newProductCost =
-            currentProductCost - costOfGoodsSold;
+            trackStock ? currentProductCost - costOfGoodsSold : currentProductCost;
 
           // Prevent negative floating-point values
           if (newProductCost < 0) {
@@ -497,6 +499,7 @@ const completeSaleWithPayment = async ({
 
           productReferences.push({
             ref: productRef,
+            trackStock,
 
             productId:
               productData.productId,
@@ -555,6 +558,7 @@ const completeSaleWithPayment = async ({
         // ==========================================
 
         for (const product of productReferences) {
+          if (!product.trackStock) continue;
           transaction.update(
             product.ref,
             {
@@ -590,6 +594,7 @@ const completeSaleWithPayment = async ({
 
         const saleItems =
           productReferences.map((product) => ({
+            trackStock: product.trackStock,
             productId:
               product.productId,
 
@@ -687,6 +692,7 @@ const completeSaleWithPayment = async ({
         // ==========================================
 
         for (const product of productReferences) {
+          if (!product.trackStock) continue;
           const stockMovementRef =
             doc(
               collection(
@@ -1360,6 +1366,8 @@ const completeSaleWithPayment = async ({
           </div>
         )}
 
+      <div className="scanner-pos-layout">
+        <div className="scanner-pos-controls">
       {/* =========================
           SCANNER STATUS
       ========================= */}
@@ -1474,103 +1482,6 @@ const completeSaleWithPayment = async ({
 
       </div>
 
-      {quickProductsModal && (
-        <div
-          className="quick-products-overlay"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              setQuickProductsModal(false);
-            }
-          }}
-        >
-          <section
-            className="quick-products-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="quick-products-title"
-          >
-            <div className="quick-products-header">
-              <div>
-                <h2 id="quick-products-title">Add a Product</h2>
-                <p>Search by product name or Product ID.</p>
-              </div>
-
-              <button
-                type="button"
-                className="quick-products-close"
-                aria-label="Close product search"
-                onClick={() => setQuickProductsModal(false)}
-              >
-                ×
-              </button>
-            </div>
-
-            <form
-              className="quick-products-search"
-              onSubmit={(event) => event.preventDefault()}
-            >
-              <input
-                type="search"
-                autoFocus
-                value={quickProductSearch}
-                onChange={(event) =>
-                  setQuickProductSearch(event.target.value)
-                }
-                placeholder="Search products..."
-                aria-label="Search products"
-              />
-            </form>
-
-            <div className="quick-products-list">
-              {filteredQuickProducts.length === 0 ? (
-                <p className="quick-products-empty">
-                  No matching products found.
-                </p>
-              ) : (
-                filteredQuickProducts.map((product) => {
-                  const stock = Number(product.stock) || 0;
-
-                  return (
-                    <button
-                      type="button"
-                      className="quick-product-item"
-                      key={product.id || product.productId}
-                      disabled={stock <= 0}
-                      onClick={() => {
-                        addToCart(product);
-                        setQuickProductsModal(false);
-                        setQuickProductSearch("");
-                        setMessage(`${product.productName} added to cart.`);
-                        setMessageType("success");
-                      }}
-                    >
-                      <span className="quick-product-info">
-                        <strong>{product.productName}</strong>
-                        <span>Product ID: {product.productId}</span>
-                      </span>
-
-                      <span className="quick-product-right">
-                        <strong>
-                          ₱{Number(product.sellingPrice || 0).toLocaleString(
-                            "en-PH",
-                            {
-                              minimumFractionDigits: 2,
-                              maximumFractionDigits: 2,
-                            }
-                          )}
-                        </strong>
-                        <span>{stock > 0 ? `${stock} in stock` : "Out of stock"}</span>
-                      </span>
-                    </button>
-                  );
-                })
-              )}
-            </div>
-          </section>
-        </div>
-      )}
-
       {/* =========================
           MESSAGE
       ========================= */}
@@ -1595,6 +1506,7 @@ const completeSaleWithPayment = async ({
         </div>
       )}
 
+        </div>
       {/* =========================
           CART
       ========================= */}
@@ -1605,12 +1517,11 @@ const completeSaleWithPayment = async ({
 
           <div>
             <h2>
-              Scanned Products
+              Cart
             </h2>
 
             <p>
-              Products scanned from the
-              barcode scanner.
+              Products added by barcode or Quick Products.
             </p>
           </div>
 
@@ -1648,12 +1559,11 @@ const completeSaleWithPayment = async ({
             </div>
 
             <h3>
-              No products scanned
+              Your cart is empty
             </h3>
 
             <p>
-              Scan a barcode to add a
-              product to the cart.
+              Scan a barcode or choose Quick Products to add items.
             </p>
 
           </div>
@@ -1772,8 +1682,6 @@ const completeSaleWithPayment = async ({
           </div>
         )}
 
-      </div>
-
       {/* =========================
           COMPLETE SALE
       ========================= */}
@@ -1790,6 +1698,105 @@ const completeSaleWithPayment = async ({
   Payment Method
 </button>
 
+        </div>
+      )}
+      </div>
+      </div>
+
+      {quickProductsModal && (
+        <div
+          className="quick-products-overlay"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setQuickProductsModal(false);
+            }
+          }}
+        >
+          <section
+            className="quick-products-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="quick-products-title"
+          >
+            <div className="quick-products-header">
+              <div>
+                <h2 id="quick-products-title">Add a Product</h2>
+                <p>Search by product name or Product ID.</p>
+              </div>
+
+              <button
+                type="button"
+                className="quick-products-close"
+                aria-label="Close product search"
+                onClick={() => setQuickProductsModal(false)}
+              >
+                ×
+              </button>
+            </div>
+
+            <form
+              className="quick-products-search"
+              onSubmit={(event) => event.preventDefault()}
+            >
+              <input
+                type="search"
+                autoFocus
+                value={quickProductSearch}
+                onChange={(event) =>
+                  setQuickProductSearch(event.target.value)
+                }
+                placeholder="Search products..."
+                aria-label="Search products"
+              />
+            </form>
+
+            <div className="quick-products-list">
+              {filteredQuickProducts.length === 0 ? (
+                <p className="quick-products-empty">
+                  No matching products found.
+                </p>
+              ) : (
+                filteredQuickProducts.map((product) => {
+                  const stock = Number(product.stock) || 0;
+
+                  return (
+                    <button
+                      type="button"
+                      className="quick-product-item"
+                      key={product.id || product.productId}
+                      disabled={product.trackStock !== false && stock <= 0}
+                      onClick={() => {
+                        addToCart(product);
+                        setQuickProductsModal(false);
+                        setQuickProductSearch("");
+                        setMessage(`${product.productName} added to cart.`);
+                        setMessageType("success");
+                      }}
+                    >
+                      <span className="quick-product-info">
+                        <strong>{product.productName}</strong>
+                        <span>Product ID: {product.productId}</span>
+                      </span>
+
+                      <span className="quick-product-right">
+                        <strong>
+                          ₱{Number(product.sellingPrice || 0).toLocaleString(
+                            "en-PH",
+                            {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            }
+                          )}
+                        </strong>
+                        <span>{product.trackStock === false ? "Dine-in • No stock limit" : stock > 0 ? `${stock} in stock` : "Out of stock"}</span>
+                      </span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </section>
         </div>
       )}
 
@@ -2193,7 +2200,7 @@ const completeSaleWithPayment = async ({
 
 
 
-      {quantityModal && ( <div className="quantity-modal-overlay" onClick={(event) => { if (event.target === event.currentTarget) { closeQuantityModal(); } }} > <div className="quantity-modal"> <div className="quantity-modal-header"> <div> <h3>Set Quantity</h3> <p>Set how many items you want to sell.</p> </div> <button type="button" className="quantity-modal-close" onClick={closeQuantityModal} > × </button> </div> <div className="quantity-modal-body"> <div className="quantity-product-name"> {quantityModal.productName} </div> <div className="stock-info"> <div> <span>Current Stock</span> <strong> {quantityModal.currentStock} </strong> </div> <div> <span>Current Cart Qty.</span> <strong> {cart.find( (item) => item.productId === quantityModal.productId )?.quantity || 0} </strong> </div> </div> <label htmlFor="quantityInput"> Enter Quantity </label> <input id="quantityInput" type="number" min="1" max={quantityModal.currentStock} value={quantityValue} onChange={(event) => { setQuantityValue(event.target.value); }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); handleSetQuantity(); } if (event.key === "Escape") { closeQuantityModal(); } }} autoFocus /> <p className="quantity-help-text"> You can set a maximum of{" "} <strong> {quantityModal.currentStock} </strong>{" "} item(s). </p> </div> <div className="quantity-modal-actions"> <button type="button" className="quantity-cancel-btn" onClick={closeQuantityModal} > Cancel </button> <button type="button" className="quantity-confirm-btn" onClick={handleSetQuantity} > Set Quantity </button> </div> </div> </div> )}
+      {quantityModal && ( <div className="quantity-modal-overlay" onClick={(event) => { if (event.target === event.currentTarget) { closeQuantityModal(); } }} > <div className="quantity-modal"> <div className="quantity-modal-header"> <div> <h3>Set Quantity</h3> <p>Set how many items you want to sell.</p> </div> <button type="button" className="quantity-modal-close" onClick={closeQuantityModal} > × </button> </div> <div className="quantity-modal-body"> <div className="quantity-product-name"> {quantityModal.productName} </div> <div className="stock-info"> <div> <span>Current Stock</span> <strong> {quantityModal.trackStock ? quantityModal.currentStock : "Not tracked"} </strong> </div> <div> <span>Current Cart Qty.</span> <strong> {cart.find( (item) => item.productId === quantityModal.productId )?.quantity || 0} </strong> </div> </div> <label htmlFor="quantityInput"> Enter Quantity </label> <input id="quantityInput" type="number" min="1" max={quantityModal.trackStock ? quantityModal.currentStock : undefined} value={quantityValue} onChange={(event) => { setQuantityValue(event.target.value); }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); handleSetQuantity(); } if (event.key === "Escape") { closeQuantityModal(); } }} autoFocus /> <p className="quantity-help-text"> {quantityModal.trackStock ? `You can set a maximum of ${quantityModal.currentStock} item(s).` : "Dine-in food has no stock limit."} </p> </div> <div className="quantity-modal-actions"> <button type="button" className="quantity-cancel-btn" onClick={closeQuantityModal} > Cancel </button> <button type="button" className="quantity-confirm-btn" onClick={handleSetQuantity} > Set Quantity </button> </div> </div> </div> )}
 
       </div>
 

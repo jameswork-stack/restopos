@@ -14,6 +14,8 @@ import "./inventory.css";
 import { auth } from "../../firebase/config";
 import { getDoc } from "firebase/firestore";
 
+const isDineIn = (product) => product?.trackStock === false;
+
 function Inventory() {
   const [showStockForm, setShowStockForm] = useState(false);
   const [stockAction, setStockAction] = useState(null);
@@ -74,6 +76,7 @@ const [deleting, setDeleting] = useState(false);
   const [stockFilter, setStockFilter] = useState("all");
 
   const [formData, setFormData] = useState({
+      trackStock: true,
     productId: "",
     productName: "",
     description: "",
@@ -106,6 +109,7 @@ const [deleting, setDeleting] = useState(false);
 
   // Open stock form
 const openStockForm = (product, action) => {
+  if (isDineIn(product)) return;
   setSelectedProduct(product);
   setStockAction(action);
 
@@ -146,6 +150,7 @@ const openEditForm = (product) => {
   setEditingProduct(product);
 
   setFormData({
+    trackStock: !isDineIn(product),
     productId: product.productId || "",
     productName: product.productName || "",
     description: product.description || "",
@@ -179,8 +184,8 @@ const handleEditProduct = async (e) => {
     !formData.productName.trim() ||
     formData.productCost === "" ||
     formData.sellingPrice === "" ||
-    formData.minimumStock === "" ||
-    formData.maximumStock === ""
+    (formData.trackStock && (formData.minimumStock === "" ||
+    formData.maximumStock === ""))
   ) {
     alert("Please fill in all required fields.");
     return;
@@ -188,8 +193,8 @@ const handleEditProduct = async (e) => {
 
   const productCost = Number(formData.productCost);
   const sellingPrice = Number(formData.sellingPrice);
-  const minimumStock = Number(formData.minimumStock);
-  const maximumStock = Number(formData.maximumStock);
+  const minimumStock = formData.trackStock ? Number(formData.minimumStock) : 0;
+  const maximumStock = formData.trackStock ? Number(formData.maximumStock) : 0;
 
   if (
     productCost < 0 ||
@@ -222,6 +227,9 @@ const handleEditProduct = async (e) => {
         productName: formData.productName.trim(),
         description: formData.description.trim(),
         productCost,
+        trackStock: formData.trackStock,
+        costPerItem: formData.trackStock ? (Number(editingProduct.stock) > 0 ? Number((productCost / Number(editingProduct.stock)).toFixed(2)) : 0) : productCost,
+        profitPerItem: Number((sellingPrice - (formData.trackStock ? (Number(editingProduct.stock) > 0 ? productCost / Number(editingProduct.stock) : 0) : productCost)).toFixed(2)),
         sellingPrice,
         minimumStock,
         maximumStock,
@@ -255,6 +263,7 @@ const handleEditProduct = async (e) => {
     setEditReason("");
 
     setFormData({
+      trackStock: true,
       productId: "",
       productName: "",
       description: "",
@@ -349,7 +358,7 @@ const handleStockUpdate = async (e) => {
     return;
   }
 
-  if (!selectedProduct) {
+  if (!selectedProduct || isDineIn(selectedProduct)) {
     return;
   }
 
@@ -600,9 +609,9 @@ const handleSubmit = async (e) => {
     !formData.productName ||
     formData.productCost === "" ||
     formData.sellingPrice === "" ||
-    formData.initialStock === "" ||
-    formData.minimumStock === "" ||
-    formData.maximumStock === ""
+    (formData.trackStock && formData.initialStock === "") ||
+    (formData.trackStock && (formData.minimumStock === "" ||
+    formData.maximumStock === ""))
   ) {
     alert("Please fill in all required fields.");
     return;
@@ -611,15 +620,15 @@ const handleSubmit = async (e) => {
   // Convert values to numbers
   const productCost = Number(formData.productCost);
   const sellingPrice = Number(formData.sellingPrice);
-  const initialStock = Number(formData.initialStock);
-  const minimumStock = Number(formData.minimumStock);
-  const maximumStock = Number(formData.maximumStock);
+  const initialStock = formData.trackStock ? Number(formData.initialStock) : 0;
+  const minimumStock = formData.trackStock ? Number(formData.minimumStock) : 0;
+  const maximumStock = formData.trackStock ? Number(formData.maximumStock) : 0;
 
   // Validate values
   if (
     productCost < 0 ||
     sellingPrice < 0 ||
-    initialStock <= 0 ||
+    (formData.trackStock && initialStock <= 0) ||
     minimumStock < 0 ||
     maximumStock < 0
   ) {
@@ -635,7 +644,7 @@ const handleSubmit = async (e) => {
   }
 
   // Calculate cost per item
-  const costPerItem = productCost / initialStock;
+  const costPerItem = formData.trackStock ? productCost / initialStock : productCost;
 
   // Calculate profit per item
   const profitPerItem = sellingPrice - costPerItem;
@@ -683,6 +692,7 @@ const handleSubmit = async (e) => {
       profitPerItem: Number(profitPerItem.toFixed(2)),
 
       // Current stock
+      trackStock: formData.trackStock,
       stock: initialStock,
 
       minimumStock,
@@ -715,6 +725,7 @@ const handleSubmit = async (e) => {
 
     // Reset form
     setFormData({
+      trackStock: true,
       productId: "",
       productName: "",
       description: "",
@@ -739,6 +750,7 @@ const handleSubmit = async (e) => {
 
   // Get stock status
   const getStockStatus = (product) => {
+    if (isDineIn(product)) return { text: "Dine-in Food", className: "dine-in-stock" };
     if (Number(product.stock) === 0) {
       return {
         text: "Out of Stock",
@@ -789,24 +801,12 @@ const handleSubmit = async (e) => {
   const maximumStock = Number(product.maximumStock);
 
   let matchesFilter = true;
-
-  if (stockFilter === "low") {
-    matchesFilter =
-      stock > 0 &&
-      stock <= minimumStock;
+  if (stockFilter === "dine-in") matchesFilter = isDineIn(product);
+  else if (stockFilter === "tracked") matchesFilter = !isDineIn(product);
+  else if (stockFilter !== "all") {
+    const status = getStockStatus(product).className;
+    matchesFilter = !isDineIn(product) && status === `${stockFilter}-stock`;
   }
-
-  if (stockFilter === "out") {
-    matchesFilter = stock === 0;
-  }
-
-  if (stockFilter === "over") {
-    matchesFilter =
-      stock >= maximumStock;
-  }
-  if (stockFilter === "over") {
-  matchesFilter = stock >= maximumStock;
-}
 
   return matchesSearch && matchesFilter;
 });
@@ -823,7 +823,7 @@ const handleSubmit = async (e) => {
 
         <button
           className="add-product-button"
-          onClick={() => setShowForm(true)}
+          onClick={() => { setFormData({ trackStock: true, productId: "", productName: "", description: "", productCost: "", sellingPrice: "", initialStock: "", minimumStock: "", maximumStock: "" }); setShowForm(true); }}
         >
           + Add Product
         </button>
@@ -853,6 +853,8 @@ const handleSubmit = async (e) => {
         </div>
 
        <div className="stock-filter">
+  <button type="button" className={`filter-button ${stockFilter === "dine-in" ? "active" : ""}`} onClick={() => setStockFilter("dine-in")}>Dine-in Food</button>
+  <button type="button" className={`filter-button ${stockFilter === "tracked" ? "active" : ""}`} onClick={() => setStockFilter("tracked")}>Stocked Products</button>
   <button
     className={
       stockFilter === "all"
@@ -923,6 +925,14 @@ const handleSubmit = async (e) => {
             <form onSubmit={handleSubmit}>
 
               <div className="form-grid">
+<div className="form-group full-width inventory-type-field">
+                  <label htmlFor="inventory-product-type">Product Type</label>
+                  <select id="inventory-product-type" value={formData.trackStock ? "stocked" : "dine-in"} onChange={(e) => setFormData(prev => ({ ...prev, trackStock: e.target.value === "stocked" }))}>
+                    <option value="stocked">Stocked Product</option>
+                    <option value="dine-in">Dine-in Food (No Stock Tracking)</option>
+                  </select>
+                  {!formData.trackStock && <small className="form-help">Enter the cost of one serving. Stock quantities are not tracked.</small>}
+                </div>
 
                 <div className="form-group">
                   <label>
@@ -965,7 +975,7 @@ const handleSubmit = async (e) => {
                 </div>
 
                 <div className="form-group">
-                  <label>Product Cost</label>
+                  <label>{formData.trackStock ? "Product Cost (Total)" : "Cost per Serving"}</label>
 
                   <input
                     type="number"
@@ -994,7 +1004,7 @@ const handleSubmit = async (e) => {
                   />
                 </div>
 
-                <div className="form-group">
+                {formData.trackStock && (<div className="form-group">
                   <label>Initial Stock</label>
 
                   <input
@@ -1006,9 +1016,9 @@ const handleSubmit = async (e) => {
                     onChange={handleChange}
                     required
                   />
-                </div>
+                </div>)}
 
-                <div className="form-group">
+                {formData.trackStock && (<div className="form-group">
                   <label>Minimum Stock</label>
 
                   <input
@@ -1020,9 +1030,9 @@ const handleSubmit = async (e) => {
                     onChange={handleChange}
                     required
                   />
-                </div>
+                </div>)}
 
-                <div className="form-group">
+                {formData.trackStock && (<div className="form-group">
                   <label>Maximum / Over Stock</label>
 
                   <input
@@ -1034,7 +1044,7 @@ const handleSubmit = async (e) => {
                     onChange={handleChange}
                     required
                   />
-                </div>
+                </div>)}
 
               </div>
 
@@ -1101,6 +1111,7 @@ const handleSubmit = async (e) => {
       <form onSubmit={handleEditProduct}>
 
         <div className="form-grid">
+<div className="form-group full-width inventory-type-field"><label>Product Type</label><div className="inventory-type-readonly">{formData.trackStock ? "Stocked Product" : "Dine-in Food"}</div></div>
 
           <div className="form-group">
             <label>
@@ -1140,7 +1151,7 @@ const handleSubmit = async (e) => {
           </div>
 
           <div className="form-group">
-            <label>Product Cost</label>
+            <label>{formData.trackStock ? "Product Cost (Total)" : "Cost per Serving"}</label>
 
             <input
               type="number"
@@ -1167,7 +1178,7 @@ const handleSubmit = async (e) => {
             />
           </div>
 
-          <div className="form-group">
+          {formData.trackStock && (<div className="form-group">
             <label>Minimum Stock</label>
 
             <input
@@ -1178,9 +1189,9 @@ const handleSubmit = async (e) => {
               onChange={handleChange}
               required
             />
-          </div>
+          </div>)}
 
-          <div className="form-group">
+          {formData.trackStock && (<div className="form-group">
             <label>Maximum / Over Stock</label>
 
             <input
@@ -1191,7 +1202,7 @@ const handleSubmit = async (e) => {
               onChange={handleChange}
               required
             />
-          </div>
+          </div>)}
 
           {/* EDIT REASON */}
           <div className="form-group full-width">
@@ -1450,7 +1461,7 @@ const handleSubmit = async (e) => {
                   <div className="price-section">
 
                     <div>
-                      <span>Cost</span>
+                      <span>{isDineIn(product) ? "Cost per Serving" : "Cost"}</span>
 
                       <strong>
                         ₱
@@ -1473,7 +1484,10 @@ const handleSubmit = async (e) => {
 
                   </div>
 
-                  <div className="stock-section">
+                  {isDineIn(product) ? (
+  <div className="inventory-dine-in-info"><span>Stock tracking disabled</span><strong>Profit per serving: ₱{(Number(product.sellingPrice) - Number(product.productCost)).toFixed(2)}</strong></div>
+) : (<>
+<div className="stock-section">
 
                     <div>
                       <span>Current Stock</span>
@@ -1515,6 +1529,7 @@ const handleSubmit = async (e) => {
   </button>
 
 </div>
+</>)}
 
                 </div>
               );

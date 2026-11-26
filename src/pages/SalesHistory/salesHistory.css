@@ -643,3 +643,35 @@
   .sale-history-total strong { font-size: 13px; }
   .sale-history-details .sale-action-trigger { width: 32px; height: 36px; }
 }
+
+/* Sales History date filter - append to salesHistory.css */
+.sales-history-page .sales-date-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px;
+  margin-bottom: 18px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+}
+.sales-date-heading h2 { margin: 0; font-size: 17px; color: #0f172a; }
+.sales-date-heading p { margin: 5px 0 0; font-size: 12px; color: #64748b; }
+.sales-date-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; min-width: 0; }
+.sales-date-controls label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 600; color: #475569; min-width: 0; }
+.sales-date-controls input, .sales-date-controls button {
+  box-sizing: border-box; height: 40px; padding: 0 12px; border: 1px solid #cbd5e1;
+  border-radius: 8px; background: #fff; color: #334155; font: inherit; font-size: 13px; min-width: 0;
+}
+.sales-date-controls input { width: 155px; }
+.sales-date-controls button { cursor: pointer; font-weight: 600; }
+.sales-date-controls button:hover { background: #eff6ff; color: #2563eb; border-color: #2563eb; }
+.sales-date-controls input:focus-visible, .sales-date-controls button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+.sales-date-error { width: 100%; color: #b91c1c; margin: 0; font-size: 13px; }
+@media (max-width: 650px) {
+  .sales-history-page .sales-date-filter { padding: 12px; }
+  .sales-date-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+  .sales-date-controls input, .sales-date-controls button { width: 100%; }
+}

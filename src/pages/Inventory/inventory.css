@@ -739,3 +739,14 @@
     flex: 1;
   }
 }
+/* Dine-in product type */
+.inventory-page .inventory-type-field select, .inventory-type-readonly { width: 100%; padding: 11px 12px; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; color: #334155; font: inherit; }
+.inventory-page .inventory-type-field select:focus { outline: 2px solid #93c5fd; }
+.inventory-type-readonly { background: #f8fafc; }
+.inventory-page .dine-in-stock { background: #ede9fe; color: #6d28d9; }
+.inventory-dine-in-info { display: flex; flex-direction: column; gap: 8px; margin-top: 15px; padding: 12px; background: #f8fafc; border-radius: 8px; color: #64748b; font-size: 12px; }
+.inventory-dine-in-info strong { color: #15803d; font-size: 13px; }
+.inventory-page .inventory-tools { flex-wrap: wrap; }
+.inventory-page .search-box { min-width: min(100%, 220px); }
+.inventory-page .stock-filter { flex-wrap: wrap; }
+.inventory-page .product-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); }

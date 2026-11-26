@@ -567,7 +567,7 @@ const handleDeleteExpense = async (expense) => {
 
           <p>Loading expenses...</p>
         </div>
-      ) : expenses.length === 0 ? (
+      ) : filteredExpenses.length === 0 ? (
 
         /* =========================
            EMPTY
@@ -578,11 +578,12 @@ const handleDeleteExpense = async (expense) => {
             ₱
           </div>
 
-          <h3>No expenses yet</h3>
+          <h3>{expenses.length === 0 ? "No expenses yet" : "No matching expenses"}</h3>
 
           <p>
-            Click "Add Expense" to record
-            your first expense.
+            {expenses.length === 0
+              ? 'Click "Add Expense" to record your first expense.'
+              : "Try a different date range or clear the filter."}
           </p>
 
         </div>
