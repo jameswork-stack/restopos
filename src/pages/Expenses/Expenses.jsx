@@ -43,6 +43,7 @@ function Expenses() {
 
   const [savingExpense, setSavingExpense] =
     useState(false);
+  const [saveFeedback, setSaveFeedback] = useState(null);
 
     const [dateFrom, setDateFrom] = useState("");
 const [dateTo, setDateTo] = useState("");
@@ -158,12 +159,23 @@ const handleDeleteExpense = async (expense) => {
 
     // Delete the expense record
     deleteBatch.delete(doc(db, "expenses", expense.id));
-    await deleteBatch.commit();
+    const syncPromise = deleteBatch.commit();
     setExpenses((current) =>
       current.filter((entry) => entry.id !== expense.id)
     );
 
-    alert("Expense deletion saved on this device. It will sync to Firestore when online.");
+    setSaveFeedback({
+      type: "success",
+      text: "Expense deletion saved on this device. It will sync to Firestore when online.",
+    });
+    void syncPromise.catch((error) => {
+      console.error("Could not sync expense deletion:", error);
+      setExpenses((current) => [expense, ...current]);
+      setSaveFeedback({
+        type: "error",
+        text: "The expense deletion could not sync to Firestore. Check your connection and permissions.",
+      });
+    });
 
     setDeletingExpense(null);
 
@@ -218,6 +230,7 @@ const handleDeleteExpense = async (expense) => {
 
     try {
       setSavingExpense(true);
+      setSaveFeedback(null);
 
       // Get logged-in user's information
       const userInfo = await getCurrentUserInfo();
@@ -239,10 +252,23 @@ const handleDeleteExpense = async (expense) => {
       const savedExpense = { id: expenseRef.id, ...expenseData };
       const expenseBatch = writeBatch(db);
       expenseBatch.set(expenseRef, expenseData);
-      await expenseBatch.commit();
+      const syncPromise = expenseBatch.commit();
       setExpenses((current) => [savedExpense, ...current]);
 
-      alert("Expense saved on this device. It will sync to Firestore when online.");
+      setSaveFeedback({
+        type: "success",
+        text: "Expense added successfully on this device. It will sync to Firestore when online.",
+      });
+      void syncPromise.catch((error) => {
+        console.error("Could not sync expense:", error);
+        setExpenses((current) =>
+          current.filter((entry) => entry.id !== expenseRef.id)
+        );
+        setSaveFeedback({
+          type: "error",
+          text: "The expense could not sync to Firestore. Check your connection and permissions.",
+        });
+      });
 
       // Clear form
       setExpenseName("");
@@ -311,6 +337,14 @@ const handleDeleteExpense = async (expense) => {
             authorized users.
           </p>
         </div>
+        {saveFeedback && (
+          <div
+            className={`expenses-save-feedback ${saveFeedback.type}`}
+            role={saveFeedback.type === "error" ? "alert" : "status"}
+          >
+            {saveFeedback.text}
+          </div>
+        )}
 
         <button
           type="button"

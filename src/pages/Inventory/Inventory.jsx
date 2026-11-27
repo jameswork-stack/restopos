@@ -74,6 +74,7 @@ const [deleting, setDeleting] = useState(false);
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [saveFeedback, setSaveFeedback] = useState(null);
 
   // Search and filter
   const [searchTerm, setSearchTerm] = useState("");
@@ -232,6 +233,7 @@ const handleEditProduct = async (e) => {
   productSaveLock.current = true;
   try {
     setUpdatingProduct(true);
+    setSaveFeedback(null);
 
     // Get currently logged-in user's information
     const userInfo = await getCurrentUserInfo();
@@ -273,7 +275,7 @@ const handleEditProduct = async (e) => {
 
         createdAt: serverTimestamp(),
     });
-    await batch.commit();
+    const syncPromise = batch.commit();
     setProducts((current) => current.map((product) =>
       product.id === editingProduct.id
         ? {
@@ -289,7 +291,20 @@ const handleEditProduct = async (e) => {
           }
         : product
     ));
-    alert("Product updated successfully.");
+    setSaveFeedback({
+      type: "success",
+      text: "Product update saved on this device. It will sync to Firestore when online.",
+    });
+    void syncPromise.catch((error) => {
+      console.error("Could not sync product update:", error);
+      setProducts((current) => current.map((product) =>
+        product.id === editingProduct.id ? editingProduct : product
+      ));
+      setSaveFeedback({
+        type: "error",
+        text: "The product update could not sync to Firestore. Check your connection and permissions.",
+      });
+    });
 
     setShowEditForm(false);
     setEditingProduct(null);
@@ -336,6 +351,7 @@ const handleDeleteProduct = async (e) => {
 
   try {
     setDeleting(true);
+    setSaveFeedback(null);
     const userInfo = await getCurrentUserInfo();
     const deleteBatch = writeBatch(db);
 
@@ -355,12 +371,23 @@ const handleDeleteProduct = async (e) => {
 
     // Delete product
     deleteBatch.delete(doc(db, "products", deletingProduct.id));
-    await deleteBatch.commit();
+    const syncPromise = deleteBatch.commit();
     setProducts((current) =>
       current.filter((product) => product.id !== deletingProduct.id)
     );
 
-    alert("Product deletion saved on this device. It will sync to Firestore when online.");
+    setSaveFeedback({
+      type: "success",
+      text: "Product deletion saved on this device. It will sync to Firestore when online.",
+    });
+    void syncPromise.catch((error) => {
+      console.error("Could not sync product deletion:", error);
+      setProducts((current) => [deletingProduct, ...current]);
+      setSaveFeedback({
+        type: "error",
+        text: "The product deletion could not sync to Firestore. Check your connection and permissions.",
+      });
+    });
 
     setShowDeleteForm(false);
     setDeletingProduct(null);
@@ -397,6 +424,7 @@ const handleStockUpdate = async (e) => {
 
   try {
     setUpdatingStock(true);
+    setSaveFeedback(null);
 
     // Get current user information
     const userInfo = await getCurrentUserInfo();
@@ -581,8 +609,7 @@ const handleStockUpdate = async (e) => {
         createdAt: serverTimestamp(),
       }
     );
-    await stockBatch.commit();
-
+    const syncPromise = stockBatch.commit();
     setProducts((current) => current.map((product) =>
       product.id === selectedProduct.id
         ? {
@@ -599,11 +626,22 @@ const handleStockUpdate = async (e) => {
     // SUCCESS
     // ==========================================
 
-    alert(
-      stockAction === "add"
+    setSaveFeedback({
+      type: "success",
+      text: stockAction === "add"
         ? "Stock saved on this device. It will sync to Firestore when online."
-        : "Stock removal saved on this device. It will sync to Firestore when online."
-    );
+        : "Stock removal saved on this device. It will sync to Firestore when online.",
+    });
+    void syncPromise.catch((error) => {
+      console.error("Could not sync stock update:", error);
+      setProducts((current) => current.map((product) =>
+        product.id === selectedProduct.id ? selectedProduct : product
+      ));
+      setSaveFeedback({
+        type: "error",
+        text: "The stock update could not sync to Firestore. Check your connection and permissions.",
+      });
+    });
 
     closeStockForm();
 
@@ -691,6 +729,7 @@ const handleSubmit = async (e) => {
   productSaveLock.current = true;
   try {
     setSaving(true);
+    setSaveFeedback(null);
     const userInfo = await getCurrentUserInfo();
 
     const productId = formData.productId.trim();
@@ -743,9 +782,20 @@ const handleSubmit = async (e) => {
       createdAt: serverTimestamp(),
     });
 
-    await batch.commit();
+    const syncPromise = batch.commit();
     setProducts((current) => [newProduct, ...current]);
-    alert("Product saved on this device. It will sync to Firestore when online.");
+    setSaveFeedback({
+      type: "success",
+      text: "Product added successfully on this device. It will sync to Firestore when online.",
+    });
+    void syncPromise.catch((error) => {
+      console.error("Could not sync new product:", error);
+      setProducts((current) => current.filter((product) => product.id !== productRef.id));
+      setSaveFeedback({
+        type: "error",
+        text: "The product could not sync to Firestore. Check your connection and permissions.",
+      });
+    });
 
     // Reset form
     setFormData({
@@ -843,6 +893,14 @@ const handleSubmit = async (e) => {
           <h1>Inventory</h1>
           <p>Manage your products and stock levels.</p>
         </div>
+        {saveFeedback && (
+          <div
+            className={`inventory-save-feedback ${saveFeedback.type}`}
+            role={saveFeedback.type === "error" ? "alert" : "status"}
+          >
+            {saveFeedback.text}
+          </div>
+        )}
 
         <button
           className="add-product-button"

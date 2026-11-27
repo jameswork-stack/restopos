@@ -16,6 +16,9 @@
 .expenses-page .expenses-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
 .expenses-page .expenses-header h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -.5px; }
 .expenses-page .expenses-header p, .expenses-page .expense-list-header p, .expenses-page .expense-form-header p { margin: 6px 0 0; font-size: 13px; line-height: 1.5; color: var(--ex-muted); }
+.expenses-page .expenses-save-feedback { padding: 12px 15px; margin: -10px 0 18px; border-radius: 8px; font-size: 13px; }
+.expenses-page .expenses-save-feedback.success { background: #ecfdf5; color: #166534; }
+.expenses-page .expenses-save-feedback.error { background: #fef2f2; color: #991b1b; }
 .expenses-page .add-expense-button, .expenses-page .save-expense-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 42px; padding: 10px 16px; border: 1px solid var(--ex-blue); border-radius: 8px; background: var(--ex-blue); color: white; font-size: 13px; font-weight: 600; white-space: nowrap; }
 .expenses-page .add-expense-button:hover, .expenses-page .save-expense-button:hover { background: #1d4ed8; }
 .expenses-page .add-expense-button span { font-size: 19px; line-height: 1; }

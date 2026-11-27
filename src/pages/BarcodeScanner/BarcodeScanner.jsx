@@ -301,7 +301,12 @@ const openQuantityModal = (item) => { const product = products.find( (product) =
       role: userInfo.role,
       createdAt: completedAt,
     });
-    await batch.commit();
+    const syncPromise = batch.commit();
+    void syncPromise.catch((error) => {
+      console.error("Could not sync offline sale:", error);
+      setMessage("Firestore rejected the sale sync. Verify the sale before trying again.");
+      setMessageType("error");
+    });
 
     return {
       saleRef,
