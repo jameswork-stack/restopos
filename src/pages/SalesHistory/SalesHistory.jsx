@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   collection,
   getDocs,
+  getDocsFromCache,
   query,
   orderBy,
   doc,
@@ -57,13 +58,12 @@ function SalesHistory() {
   }, []);
 
   const loadSalesHistory = async () => {
+    const salesQuery = query(
+      collection(db, "saleActivity"),
+      orderBy("createdAt", "desc")
+    );
     try {
       setLoading(true);
-
-      const salesQuery = query(
-        collection(db, "saleActivity"),
-        orderBy("createdAt", "desc")
-      );
 
       const snapshot = await getDocs(salesQuery);
 
@@ -74,7 +74,17 @@ function SalesHistory() {
 
       setSales(salesList);
     } catch (error) {
-      console.error("Error loading sales history:", error);
+      console.error("Error loading sales history from server:", error);
+      try {
+        const cachedSnapshot = await getDocsFromCache(salesQuery);
+        setSales(cachedSnapshot.docs.map((saleDoc) => ({
+          ...saleDoc.data(),
+          id: saleDoc.id,
+        })));
+      } catch (cacheError) {
+        console.error("Error loading cached sales history:", cacheError);
+        setErrorMessage("Unable to load sales history from this device.");
+      }
     } finally {
       setLoading(false);
     }

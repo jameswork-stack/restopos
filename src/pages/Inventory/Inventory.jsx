@@ -1,11 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   collection,
   addDoc,
   getDocs,
-  updateDoc,
+  getDocsFromCache,
+  getDocsFromServer,
+  writeBatch,
   deleteDoc,
   doc,
+  getDocFromCache,
   serverTimestamp,
 } from "firebase/firestore";
 
@@ -16,7 +19,52 @@ import { getDoc } from "firebase/firestore";
 
 const isDineIn = (product) => product?.trackStock === false;
 
+const normalizeId = (value) => String(value ?? "").trim().toLowerCase();
+const normalizeName = (value) => normalizeId(value).replace(/\s+/g, " ");
+const isNetworkError = (error) =>
+  error?.code === "unavailable" ||
+  error?.code === "deadline-exceeded" ||
+  (typeof navigator !== "undefined" && !navigator.onLine);
+
 function Inventory() {
+  const productSaveLock = useRef(false);
+
+  const checkDuplicateProduct = async (productId, productName, excludeId = null) => {
+    let snapshot;
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      try {
+        snapshot = await getDocsFromCache(collection(db, "products"));
+      } catch (cacheError) {
+        console.warn("Could not check the Firestore product cache:", cacheError);
+      }
+    } else {
+      try {
+        snapshot = await getDocsFromServer(collection(db, "products"));
+      } catch (error) {
+        if (!isNetworkError(error)) {
+          throw error;
+        }
+        try {
+          snapshot = await getDocsFromCache(collection(db, "products"));
+        } catch (cacheError) {
+          console.warn("Could not check the Firestore product cache:", cacheError);
+        }
+      }
+    }
+    const otherProducts = snapshot
+      ? snapshot.docs.filter((entry) => entry.id !== excludeId)
+      : products
+        .filter((entry) => entry.id !== excludeId)
+        .map((entry) => ({ id: entry.id, data: () => entry }));
+    if (otherProducts.some((entry) => normalizeId(entry.data().productId) === normalizeId(productId))) {
+      return "A product with this Product ID / Barcode already exists.";
+    }
+    if (otherProducts.some((entry) => normalizeName(entry.data().productName) === normalizeName(productName))) {
+      return "A product with this name already exists. Edit the existing product or use Add Stock instead.";
+    }
+    return null;
+  };
+
   const [showStockForm, setShowStockForm] = useState(false);
   const [stockAction, setStockAction] = useState(null);
   const [selectedProduct, setSelectedProduct] = useState(null);
@@ -34,21 +82,36 @@ const getCurrentUserInfo = async () => {
     throw new Error("User is not logged in.");
   }
 
-  const userSnapshot = await getDoc(
-    doc(db, "users", currentUser.uid)
-  );
-
-  if (!userSnapshot.exists()) {
-    throw new Error("User information was not found.");
+  let userSnapshot;
+  let networkUnavailable = false;
+  try {
+    userSnapshot = typeof navigator !== "undefined" && !navigator.onLine
+      ? await getDocFromCache(doc(db, "users", currentUser.uid))
+      : await getDoc(doc(db, "users", currentUser.uid));
+  } catch (error) {
+    if (!isNetworkError(error)) {
+      throw error;
+    }
+    networkUnavailable = true;
   }
 
-  const userData = userSnapshot.data();
+  if (userSnapshot?.exists()) {
+    const userData = userSnapshot.data();
+    return {
+      userId: currentUser.uid,
+      email: userData.email || currentUser.email,
+      role: userData.role || "unknown",
+    };
+  }
 
-  return {
-    userId: currentUser.uid,
-    email: userData.email || currentUser.email,
-    role: userData.role || "unknown",
-  };
+  if ((typeof navigator !== "undefined" && !navigator.onLine) || networkUnavailable) {
+    return {
+      userId: currentUser.uid,
+      email: currentUser.email,
+      role: "unknown",
+    };
+  }
+  throw new Error("User information was not found.");
 };
 
 const [openMenuId, setOpenMenuId] = useState(null);
@@ -101,7 +164,18 @@ const [deleting, setDeleting] = useState(false);
 
       setProducts(productList);
     } catch (error) {
-      console.error("Error loading products:", error);
+      if (!isNetworkError(error)) {
+        console.error("Error loading products:", error);
+      }
+      try {
+        const cachedSnapshot = await getDocsFromCache(collection(db, "products"));
+        setProducts(cachedSnapshot.docs.map((productDoc) => ({
+          id: productDoc.id,
+          ...productDoc.data(),
+        })));
+      } catch (cacheError) {
+        console.error("Error loading cached products:", cacheError);
+      }
     } finally {
       setLoading(false);
     }
@@ -170,7 +244,7 @@ const openEditForm = (product) => {
 const handleEditProduct = async (e) => {
   e.preventDefault();
 
-  if (!editingProduct) {
+  if (!editingProduct || productSaveLock.current) {
     return;
   }
 
@@ -213,14 +287,18 @@ const handleEditProduct = async (e) => {
     return;
   }
 
+  productSaveLock.current = true;
   try {
     setUpdatingProduct(true);
 
     // Get currently logged-in user's information
     const userInfo = await getCurrentUserInfo();
 
+    const duplicate = await checkDuplicateProduct(formData.productId, formData.productName, editingProduct.id);
+    if (duplicate) { alert(duplicate); return; }
+    const batch = writeBatch(db);
     // Update product
-    await updateDoc(
+    batch.update(
       doc(db, "products", editingProduct.id),
       {
         productId: formData.productId.trim(),
@@ -234,12 +312,11 @@ const handleEditProduct = async (e) => {
         minimumStock,
         maximumStock,
         updatedAt: serverTimestamp(),
-      }
-    );
+    });
 
     // Record edit activity
-    await addDoc(
-      collection(db, "productActivity"),
+    batch.set(
+      doc(collection(db, "productActivity")),
       {
         action: "edit",
 
@@ -253,9 +330,10 @@ const handleEditProduct = async (e) => {
         role: userInfo.role,
 
         createdAt: serverTimestamp(),
-      }
-    );
+    });
+    await stockBatch.commit();
 
+    await batch.commit();
     alert("Product updated successfully.");
 
     setShowEditForm(false);
@@ -280,6 +358,7 @@ const handleEditProduct = async (e) => {
     console.error("Error updating product:", error);
     alert("Failed to update product.");
   } finally {
+    productSaveLock.current = false;
     setUpdatingProduct(false);
   }
 };
@@ -469,9 +548,8 @@ const handleStockUpdate = async (e) => {
     // UPDATE PRODUCT
     // ==========================================
 
-    await updateDoc(
-      doc(db, "products", selectedProduct.id),
-      {
+    const stockBatch = writeBatch(db);
+    stockBatch.update(doc(db, "products", selectedProduct.id), {
         stock: newStock,
 
         // Total cost of current inventory
@@ -499,9 +577,7 @@ const handleStockUpdate = async (e) => {
     const previousProfitPerItem =
       sellingPrice - previousCostPerItem;
 
-    await addDoc(
-      collection(db, "stockMovements"),
-      {
+    stockBatch.set(doc(collection(db, "stockMovements")), {
         productId: selectedProduct.productId,
 
         productName: selectedProduct.productName,
@@ -598,15 +674,13 @@ const handleStockUpdate = async (e) => {
 const handleSubmit = async (e) => {
   e.preventDefault();
 
-  if (saving) {
+  if (saving || productSaveLock.current) {
     return;
   }
 
-  const userInfo = await getCurrentUserInfo();
-
   if (
-    !formData.productId ||
-    !formData.productName ||
+    !formData.productId.trim() ||
+    !formData.productName.trim() ||
     formData.productCost === "" ||
     formData.sellingPrice === "" ||
     (formData.trackStock && formData.initialStock === "") ||
@@ -649,30 +723,19 @@ const handleSubmit = async (e) => {
   // Calculate profit per item
   const profitPerItem = sellingPrice - costPerItem;
 
+  productSaveLock.current = true;
   try {
     setSaving(true);
+    const userInfo = await getCurrentUserInfo();
 
     const productId = formData.productId.trim();
 
-    // Check if Product ID already exists
-    const existingProductsSnapshot = await getDocs(
-      collection(db, "products")
-    );
-
-    const productAlreadyExists = existingProductsSnapshot.docs.some(
-      (productDoc) =>
-        String(productDoc.data().productId || "")
-          .trim()
-          .toLowerCase() === productId.toLowerCase()
-    );
-
-    if (productAlreadyExists) {
-      alert("A product with this Product ID already exists.");
-      return;
-    }
+    const duplicate = await checkDuplicateProduct(productId, formData.productName);
+    if (duplicate) { alert(duplicate); return; }
+    const batch = writeBatch(db);
 
     // Add product
-    await addDoc(collection(db, "products"), {
+    batch.set(doc(collection(db, "products")), {
       productId,
 
       productName: formData.productName.trim(),
@@ -703,7 +766,7 @@ const handleSubmit = async (e) => {
     });
 
     // Record product activity
-    await addDoc(collection(db, "productActivity"), {
+    batch.set(doc(collection(db, "productActivity")), {
       action: "add",
 
       productId,
@@ -721,6 +784,7 @@ const handleSubmit = async (e) => {
       createdAt: serverTimestamp(),
     });
 
+    await batch.commit();
     alert("Product added successfully.");
 
     // Reset form
@@ -743,6 +807,7 @@ const handleSubmit = async (e) => {
     console.error("Error adding product:", error);
     alert("Failed to add product.");
   } finally {
+    productSaveLock.current = false;
     setSaving(false);
   }
 };
@@ -916,7 +981,8 @@ const handleSubmit = async (e) => {
 
               <button
                 className="close-form-button"
-                onClick={() => setShowForm(false)}
+                disabled={saving}
+                  onClick={() => setShowForm(false)}
               >
                 ×
               </button>
@@ -1053,6 +1119,7 @@ const handleSubmit = async (e) => {
                 <button
                   type="button"
                   className="cancel-button"
+                  disabled={saving}
                   onClick={() => setShowForm(false)}
                 >
                   Cancel

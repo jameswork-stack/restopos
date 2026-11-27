@@ -3,10 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import {
   collection,
   getDocs,
-  addDoc,
+  getDocsFromCache,
   serverTimestamp,
   doc,
   getDoc,
+  getDocFromCache,
+  writeBatch,
   runTransaction,
 } from "firebase/firestore";
 
@@ -177,23 +179,192 @@ const openQuantityModal = (item) => { const product = products.find( (product) =
       throw new Error("User is not logged in.");
     }
 
-    const userSnapshot = await getDoc(
-      doc(db, "users", currentUser.uid)
-    );
-
-    if (!userSnapshot.exists()) {
-      throw new Error(
-        "User information was not found."
-      );
+    let userSnapshot;
+    let networkUnavailable = false;
+    try {
+      userSnapshot = typeof navigator !== "undefined" && !navigator.onLine
+        ? await getDocFromCache(doc(db, "users", currentUser.uid))
+        : await getDoc(doc(db, "users", currentUser.uid));
+    } catch (error) {
+      if (error?.code !== "unavailable" &&
+          error?.code !== "deadline-exceeded" &&
+          !(typeof navigator !== "undefined" && !navigator.onLine)) {
+        throw error;
+      }
+      networkUnavailable = true;
     }
 
-    const userData = userSnapshot.data();
+    if (userSnapshot?.exists()) {
+      const userData = userSnapshot.data();
+      return {
+        userId: currentUser.uid,
+        email: userData.email || currentUser.email,
+        role: userData.role || "unknown",
+      };
+    }
+
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      return {
+        userId: currentUser.uid,
+        email: currentUser.email,
+        role: "unknown",
+      };
+    }
+    if (!userSnapshot && networkUnavailable) {
+      return {
+        userId: currentUser.uid,
+        email: currentUser.email,
+        role: "unknown",
+      };
+    }
+    throw new Error("User information was not found.");
+  };
+
+  const completeOfflineSale = async (userInfo, finalGcashAmount, finalCashAmount, paymentMethod, changeAmount) => {
+    const batch = writeBatch(db);
+    const productDetails = cart.map((item) => {
+      const product = products.find((entry) =>
+        entry.id === item.id ||
+        String(entry.productId).trim().toLowerCase() ===
+          String(item.productId).trim().toLowerCase()
+      );
+      if (!product) {
+        throw new Error(`Product "${item.productName}" is not available in the offline product list.`);
+      }
+      const trackStock = product.trackStock !== false;
+      const currentStock = Number(product.stock) || 0;
+      const currentProductCost = Number(product.productCost) || 0;
+      const sellingPrice = Number(product.sellingPrice) || 0;
+      const quantity = Number(item.quantity);
+      if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+        throw new Error(`Invalid quantity for "${item.productName}".`);
+      }
+      if (trackStock && currentStock < quantity) {
+        throw new Error(`Not enough stock for "${item.productName}". Available: ${currentStock}, requested: ${quantity}.`);
+      }
+
+      const costPerItem = !trackStock
+        ? Number(product.costPerItem ?? product.productCost ?? 0)
+        : Number(product.costPerItem) ||
+          (currentStock > 0 ? currentProductCost / currentStock : 0);
+      const subtotal = sellingPrice * quantity;
+      const costOfGoodsSold = costPerItem * quantity;
+      const itemProfit = subtotal - costOfGoodsSold;
+      const newStock = trackStock ? currentStock - quantity : currentStock;
+      const newProductCost = trackStock
+        ? Number(Math.max(0, currentProductCost - costOfGoodsSold).toFixed(2))
+        : currentProductCost;
+      const newCostPerItem = newStock > 0 ? newProductCost / newStock : 0;
+      const newProfitPerItem = sellingPrice - costPerItem;
+
+      return {
+        item,
+        trackStock,
+        product,
+        currentStock,
+        currentProductCost,
+        sellingPrice,
+        quantity,
+        costPerItem,
+        subtotal,
+        costOfGoodsSold,
+        itemProfit,
+        newStock,
+        newProductCost,
+        newCostPerItem,
+        newProfitPerItem,
+      };
+    });
+
+    const totalSales = Number(productDetails.reduce((sum, product) => sum + product.subtotal, 0).toFixed(2));
+    const totalCostOfGoodsSold = Number(productDetails.reduce((sum, product) => sum + product.costOfGoodsSold, 0).toFixed(2));
+    const totalProfit = Number(productDetails.reduce((sum, product) => sum + product.itemProfit, 0).toFixed(2));
+    const saleItems = productDetails.map((product) => ({
+      trackStock: product.trackStock,
+      productId: product.product.productId,
+      productName: product.product.productName,
+      sellingPrice: Number(product.sellingPrice.toFixed(2)),
+      costPerItem: Number(product.costPerItem.toFixed(2)),
+      profitPerItem: Number(product.newProfitPerItem.toFixed(2)),
+      quantity: product.quantity,
+      subtotal: Number(product.subtotal.toFixed(2)),
+      costOfGoodsSold: Number(product.costOfGoodsSold.toFixed(2)),
+      profit: Number(product.itemProfit.toFixed(2)),
+    }));
+
+    const saleRef = doc(collection(db, "sales"));
+    const saleActivityRef = doc(collection(db, "saleActivity"));
+    const completedAt = new Date();
+    for (const product of productDetails) {
+      if (!product.trackStock) continue;
+      batch.update(doc(db, "products", product.product.id), {
+        stock: product.newStock,
+        productCost: product.newProductCost,
+        costPerItem: Number(product.newCostPerItem.toFixed(2)),
+        profitPerItem: Number(product.newProfitPerItem.toFixed(2)),
+        updatedAt: serverTimestamp(),
+      });
+      batch.set(doc(collection(db, "stockMovements")), {
+        productId: product.product.productId,
+        productName: product.product.productName,
+        action: "remove",
+        quantity: product.quantity,
+        previousStock: product.currentStock,
+        newStock: product.newStock,
+        previousCost: Number(product.currentProductCost.toFixed(2)),
+        costAmount: Number(product.costOfGoodsSold.toFixed(2)),
+        newCost: Number(product.newProductCost.toFixed(2)),
+        previousCostPerItem: Number(product.costPerItem.toFixed(2)),
+        newCostPerItem: Number(product.newCostPerItem.toFixed(2)),
+        reason: "Sale",
+        userId: userInfo.userId,
+        email: userInfo.email,
+        role: userInfo.role,
+        createdAt: serverTimestamp(),
+      });
+    }
+
+    batch.set(saleRef, {
+      items: saleItems,
+      total: totalSales,
+      costOfGoodsSold: totalCostOfGoodsSold,
+      profit: totalProfit,
+      paymentMethod,
+      gcashAmount: finalGcashAmount,
+      cashAmount: finalCashAmount,
+      change: changeAmount,
+      userId: userInfo.userId,
+      email: userInfo.email,
+      role: userInfo.role,
+      completedAt,
+    });
+    batch.set(saleActivityRef, {
+      action: "sale_completed",
+      saleId: saleRef.id,
+      total: totalSales,
+      costOfGoodsSold: totalCostOfGoodsSold,
+      profit: totalProfit,
+      paymentMethod,
+      gcashAmount: finalGcashAmount,
+      cashAmount: finalCashAmount,
+      change: changeAmount,
+      items: saleItems,
+      userId: userInfo.userId,
+      email: userInfo.email,
+      role: userInfo.role,
+      createdAt: completedAt,
+    });
+    await batch.commit();
 
     return {
-      userId: currentUser.uid,
-      email:
-        userData.email || currentUser.email,
-      role: userData.role || "unknown",
+      saleRef,
+      totalSales,
+      totalCostOfGoodsSold,
+      totalProfit,
+      cashAmount: finalCashAmount,
+      gcashAmount: finalGcashAmount,
+      change: changeAmount,
+      paymentMethod,
     };
   };
 
@@ -334,9 +505,20 @@ const completeSaleWithPayment = async ({
     // FIRESTORE TRANSACTION
     // ==========================================
 
-    const saleReference = await runTransaction(
-      db,
-      async (transaction) => {
+    let saleReference;
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      saleReference = await completeOfflineSale(
+        userInfo,
+        finalGcashAmount,
+        finalCashAmount,
+        paymentMethod,
+        changeAmount
+      );
+    } else {
+      try {
+        saleReference = await runTransaction(
+          db,
+          async (transaction) => {
         const productReferences = [];
 
         let totalSales = 0;
@@ -846,8 +1028,23 @@ const completeSaleWithPayment = async ({
             changeAmount,
           paymentMethod,
         };
+          }
+        );
+      } catch (error) {
+        if (error?.code !== "unavailable" &&
+            error?.code !== "deadline-exceeded" &&
+            !(typeof navigator !== "undefined" && !navigator.onLine)) {
+          throw error;
+        }
+        saleReference = await completeOfflineSale(
+          userInfo,
+          finalGcashAmount,
+          finalCashAmount,
+          paymentMethod,
+          changeAmount
+        );
       }
-    );
+    }
 
     // ==========================================
     // CLEAR CART AFTER SUCCESSFUL TRANSACTION
@@ -894,6 +1091,7 @@ const completeSaleWithPayment = async ({
 
     setMessage(successMessage);
     setMessageType("success");
+    await loadProducts();
 
     // ==========================================
     // CONSOLE LOGS
@@ -977,13 +1175,18 @@ const completeSaleWithPayment = async ({
 
       setProducts(productList);
     } catch (error) {
-      console.error(
-        "Error loading products:",
-        error
-      );
-
-      setMessage("Failed to load products.");
-      setMessageType("error");
+      console.error("Error loading products from server:", error);
+      try {
+        const cachedSnapshot = await getDocsFromCache(collection(db, "products"));
+        setProducts(cachedSnapshot.docs.map((productDoc) => ({
+          id: productDoc.id,
+          ...productDoc.data(),
+        })));
+      } catch (cacheError) {
+        console.error("Error loading cached products:", cacheError);
+        setMessage("Failed to load products from local storage.");
+        setMessageType("error");
+      }
     } finally {
       setLoadingProducts(false);
     }
