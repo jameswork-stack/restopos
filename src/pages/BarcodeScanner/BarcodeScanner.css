@@ -4600,3 +4600,22 @@
 .scanner-pos-layout .scanner-message p { overflow-wrap: anywhere; font-size: 12px; }
 @container (max-width: 690px) { .scanner-pos-layout { grid-template-columns: minmax(0, 1fr); } .scanner-pos-layout .scanner-cart { min-height: 280px; } }
 @media (max-width: 700px) { .barcode-scanner-page { padding: 10px; } .scanner-pos-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; } .scanner-pos-layout .cart-list { max-height: 55vh; } }
+
+
+/* Local-first checkout and synchronization */
+.barcode-scanner-page .scanner-sync-status { display:flex; align-items:center; flex-wrap:wrap; gap:10px 14px; padding:12px 16px; margin:0 0 18px; border:1px solid #e2e8f0; border-radius:10px; background:#fff; color:#475569; font-size:13px; overflow-wrap:anywhere; }
+.scanner-sync-status > strong { color:#111827; }
+.scanner-sync-live, .scanner-sync-wait { padding:5px 9px; border-radius:6px; font-weight:600; }
+.scanner-sync-live { background:#dcfce7; color:#166534; }
+.scanner-sync-wait { background:#fef3c7; color:#92400e; }
+.scanner-sync-error { flex:1 0 100%; padding:12px; border:1px solid #fecaca; background:#fef2f2; border-radius:8px; color:#991b1b; }
+.scanner-sync-error p { margin:7px 0; }
+.scanner-sync-error button { border:1px solid #fca5a5; background:white; color:#991b1b; border-radius:6px; padding:8px 12px; margin:5px 8px 0 0; cursor:pointer; }
+.scanner-is-saving .scanner-cart, .scanner-is-saving .scanner-input-section, .scanner-is-saving .manual-scanner-section, .scanner-is-saving .quick-products-overlay, .scanner-is-saving .quantity-modal-overlay { pointer-events:none; opacity:.75; }
+.barcode-scanner-page button:disabled { cursor:not-allowed; opacity:.55; }
+@media(max-width:600px) { .barcode-scanner-page .scanner-sync-status { align-items:flex-start; flex-direction:column; } .scanner-sync-error { width:100%; box-sizing:border-box; } }
+@media(prefers-reduced-motion:reduce) { .barcode-scanner-page .loading-spinner { animation:none; } }
+
+.scanner-payment-error, .scanner-payment-progress { padding:10px 12px; margin:10px 0; border-radius:8px; font-size:13px; overflow-wrap:anywhere; }
+.scanner-payment-error { background:#fef2f2; color:#991b1b; }
+.scanner-payment-progress { background:#eff6ff; color:#1d4ed8; }

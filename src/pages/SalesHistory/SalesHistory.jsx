@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo, useSyncExternalStore } from "react";
 import {
   collection,
-  getDocs,
+  onSnapshot,
   getDocsFromCache,
+  where,
   query,
   orderBy,
   doc,
@@ -11,7 +12,7 @@ import {
 
 import { createPortal } from "react-dom";
 import { jsPDF } from "jspdf";
-import { db } from "../../firebase/config";
+import { auth, db } from "../../firebase/config";
 import "./salesHistory.css";
 
 
@@ -30,19 +31,60 @@ const getCurrentMonth = () => {
   return { from: `${today.slice(0, 7)}-01`, to: today };
 };
 
+// Memory cache survives route changes, but is isolated by authenticated user.
+const historyCache = new Map();
+const deleteJobs = new Map();
+const deleteSubscribers = new Set();
+let deleteVersion = 0;
+const notifyDeletes = () => { deleteVersion++; deleteSubscribers.forEach(fn => fn()); };
+const subscribeDeletes = (fn) => { deleteSubscribers.add(fn); return () => deleteSubscribers.delete(fn); };
+const getDeleteVersion = () => deleteVersion;
+const emptyHistory = { sales: [], hasSnapshot: false };
+// Clear sensitive cached records when the authenticated account changes.
+import { onAuthStateChanged } from "firebase/auth";
+let cacheOwner = auth.currentUser?.uid || null;
+onAuthStateChanged(auth, user => {
+  const uid = user?.uid || null;
+  if (uid !== cacheOwner) { historyCache.clear(); cacheOwner = uid; }
+});
+const subscribeAuth = (fn) => onAuthStateChanged(auth, fn);
+const getUid = () => auth.currentUser?.uid || null;
+
 function SalesHistory() {
+  const uid = useSyncExternalStore(subscribeAuth, getUid);
+  const deletionVersion = useSyncExternalStore(subscribeDeletes, getDeleteVersion);
   const [dateFrom, setDateFrom] = useState(() => getCurrentMonth().from);
   const [dateTo, setDateTo] = useState(() => getCurrentMonth().to);
-  const [sales, setSales] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const cacheKey = JSON.stringify([uid, dateFrom, dateTo]);
+  const [history, setHistory] = useState(() => ({ key: cacheKey, ...(historyCache.get(cacheKey) || emptyHistory) }));
+  const currentHistory = history.key === cacheKey ? history : historyCache.get(cacheKey) || emptyHistory;
+  const sales = currentHistory.sales;
+  const hasSnapshot = currentHistory.hasSnapshot;
+  const loading = false; // Never block the page on network access.
 
   // Selected sale for View modal
   const [selectedSale, setSelectedSale] = useState(null);
 
   const [menu, setMenu] = useState(null);
-  const [deleting, setDeleting] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [errorMessage, setErrorMessage] = useState("");
+  const [fromCache, setFromCache] = useState(true);
+  const [syncError, setSyncError] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const jobs = useMemo(() => [...deleteJobs.values()].filter(job => job.uid === uid), [uid, deletionVersion]);
+  const pendingDeletes = jobs.filter(job => job.status === "pending");
+  const failedDeletes = jobs.filter(job => job.status === "failed");
+  const [visibleCount, setVisibleCount] = useState(50);
+  const [online, setOnline] = useState(() => navigator.onLine);
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => {
+      window.removeEventListener("online", update);
+      window.removeEventListener("offline", update);
+    };
+  }, []);
 
   useEffect(() => {
     const close = () => setMenu(null);
@@ -57,57 +99,53 @@ function SalesHistory() {
     };
   }, []);
 
-  const loadSalesHistory = async () => {
-    const salesQuery = query(
-      collection(db, "saleActivity"),
-      orderBy("createdAt", "desc")
-    );
-    try {
-      setLoading(true);
-
-      const snapshot = await getDocs(salesQuery);
-
-      const salesList = snapshot.docs.map((saleDoc) => ({
-        ...saleDoc.data(),
-        id: saleDoc.id,
-      }));
-
-      setSales(salesList);
-    } catch (error) {
-      console.error("Error loading sales history from server:", error);
-      try {
-        const cachedSnapshot = await getDocsFromCache(salesQuery);
-        setSales(cachedSnapshot.docs.map((saleDoc) => ({
-          ...saleDoc.data(),
-          id: saleDoc.id,
-        })));
-      } catch (cacheError) {
-        console.error("Error loading cached sales history:", cacheError);
-        setErrorMessage("Unable to load sales history from this device.");
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadSalesHistory();
-  }, []);
-
-  // ---------------------------------------
-  // TOTAL TRANSACTIONS
-  // ---------------------------------------
   const invalidRange = Boolean(dateFrom && dateTo && dateFrom > dateTo);
-  const filteredSales = sales.filter((sale) => {
-    if (invalidRange) return false;
-    if (!dateFrom && !dateTo) return true;
-    if (!sale.createdAt) return false;
-    const date = typeof sale.createdAt.toDate === "function"
-      ? sale.createdAt.toDate() : new Date(sale.createdAt);
-    if (Number.isNaN(date.getTime())) return false;
-    const day = manilaDate(date);
-    return (!dateFrom || day >= dateFrom) && (!dateTo || day <= dateTo);
-  });
+  useEffect(() => {
+    setVisibleCount(50);
+    setFromCache(true);
+    setSyncError(false);
+    if (invalidRange || !uid) return;
+    const constraints = [];
+    if (dateFrom) constraints.push(where("createdAt", ">=", new Date(`${dateFrom}T00:00:00+08:00`)));
+    if (dateTo) constraints.push(where("createdAt", "<", new Date(new Date(`${dateTo}T00:00:00+08:00`).getTime() + 86400000)));
+    const salesQuery = query(collection(db, "saleActivity"), ...constraints, orderBy("createdAt", "desc"));
+    let active = true;
+    let listenerReceived = false;
+    const apply = snapshot => {
+      if (!active || auth.currentUser?.uid !== uid) return;
+      const value = { sales: snapshot.docs.map(entry => ({ ...entry.data({ serverTimestamps: "estimate" }), id: entry.id, pendingSync: entry.metadata.hasPendingWrites })), hasSnapshot: true };
+      historyCache.set(cacheKey, value);
+      if (historyCache.size > 12) historyCache.delete(historyCache.keys().next().value);
+      setHistory({ key: cacheKey, ...value });
+      setFromCache(snapshot.metadata.fromCache);
+    };
+    // Read IndexedDB directly on a cold visit, without waiting for the listener.
+    getDocsFromCache(salesQuery).then(snapshot => {
+      if (!listenerReceived && !historyCache.has(cacheKey)) apply(snapshot);
+    }).catch(() => {});
+    const unsubscribe = onSnapshot(salesQuery, { includeMetadataChanges: true }, snapshot => {
+      listenerReceived = true;
+      apply(snapshot);
+    }, error => {
+      if (!active) return;
+      listenerReceived = true;
+      console.error("Sales history listener failed:", error);
+      setSyncError(true);
+      if (error.code === "permission-denied" || error.code === "unauthenticated") {
+        historyCache.delete(cacheKey);
+        setHistory({ key: cacheKey, ...emptyHistory });
+      }
+      setErrorMessage("Unable to synchronize sales history. Check access and retry.");
+    });
+    return () => { active = false; unsubscribe(); };
+  }, [uid, cacheKey, dateFrom, dateTo, invalidRange, retry]);
+
+  const filteredSales = useMemo(() => {
+    if (invalidRange || !uid) return [];
+    const hidden = new Set(jobs.filter(job => job.status !== "failed").map(job => job.id));
+    return sales.filter(sale => !hidden.has(sale.id));
+  }, [sales, jobs, invalidRange, uid]);
+
   const totalTransactions = filteredSales.length;
 
   // ---------------------------------------
@@ -268,19 +306,29 @@ function SalesHistory() {
     printWindow.print();
   };
 
-  const handleDeleteSale = async () => {
-    if (!deleteTarget || deleting) return;
-    setDeleting(true);
+  const handleDeleteSale = () => {
+    if (!deleteTarget || !uid || auth.currentUser?.uid !== uid) return;
+    const target = deleteTarget;
+    const key = JSON.stringify([uid, target.id]);
+    if (deleteJobs.get(key)?.status === "pending") return;
+    deleteJobs.set(key, { uid, id: target.id, label: target.saleId || target.id, status: "pending" });
+    notifyDeletes();
     setErrorMessage("");
-    try {
-      await deleteDoc(doc(db, "saleActivity", deleteTarget.id));
-      setSales((previous) => previous.filter((sale) => sale.id !== deleteTarget.id));
-      if (selectedSale?.id === deleteTarget.id) setSelectedSale(null);
-      setDeleteTarget(null);
-    } catch (error) {
-      console.error("Error deleting sale:", error);
-      setErrorMessage("Unable to delete sale. Check your permissions and connection.");
-    } finally { setDeleting(false); }
+    setDeleteTarget(null);
+    if (selectedSale?.id === target.id) setSelectedSale(null);
+    // Submit once. The promise can remain pending offline; do not await it in UI.
+    Promise.resolve().then(() => deleteDoc(doc(db, "saleActivity", target.id))).then(() => {
+      // Remove confirmed records from every retained date-range snapshot.
+      for (const [range, value] of historyCache) {
+        if (JSON.parse(range)[0] === uid) historyCache.set(range, { ...value, sales: value.sales.filter(sale => sale.id !== target.id) });
+      }
+      deleteJobs.set(key, { uid, id: target.id, status: "confirmed" });
+      notifyDeletes();
+    }).catch(error => {
+      console.error("Deletion rejected:", error);
+      deleteJobs.set(key, { uid, id: target.id, label: target.saleId || target.id, status: "failed" });
+      notifyDeletes();
+    });
   };
 
   return (
@@ -327,6 +375,12 @@ function SalesHistory() {
         {invalidRange && <p className="sales-date-error" role="alert">Date From must not be after Date To.</p>}
       </div>
 
+      <div className={`sales-sync-status ${syncError ? "sync-error" : (!online || fromCache || pendingDeletes.length) ? "sync-pending" : "sync-ready"}`} role="status">
+        <div><strong>{syncError ? "Sync unavailable" : !online ? "Offline mode" : (fromCache || !hasSnapshot) ? "Cached records · awaiting server" : "Server connected"}</strong>
+          <span>{pendingDeletes.length ? `${pendingDeletes.length} deletion(s) awaiting confirmation. ` : ""}{fromCache ? "Cached totals may be incomplete." : ""}</span></div>
+        {syncError && <button type="button" onClick={() => setRetry((value) => value + 1)}>Retry</button>}
+      </div>
+      {failedDeletes.length > 0 && <div className="sales-sync-status sync-error" role="alert"><div><strong>Deletion rejected</strong><span>{failedDeletes.map(job => `Sale #${job.label}`).join(", ")} could not be deleted. Check permissions before retrying.</span></div><button type="button" onClick={() => { for (const [key, job] of deleteJobs) if (job.uid === uid && job.status === "failed") deleteJobs.delete(key); notifyDeletes(); setRetry(value => value + 1); }}>Dismiss / refresh</button></div>}
       <div className="sales-summary">
 
         {/* TOTAL TRANSACTIONS */}
@@ -339,7 +393,7 @@ function SalesHistory() {
             <strong>
               {loading
                 ? "Loading..."
-                : totalTransactions.toLocaleString("en-PH")}
+                : !hasSnapshot || (fromCache && !totalTransactions) ? "—" : totalTransactions.toLocaleString("en-PH")}
             </strong>
           </div>
         </div>
@@ -381,10 +435,10 @@ function SalesHistory() {
           <div className="sales-history-empty">
             <div className="empty-sales-icon">₱</div>
 
-            <h3>{sales.length === 0 ? "No sales yet" : "No matching transactions"}</h3>
+            <h3>{invalidRange ? "Invalid date range" : !hasSnapshot || fromCache ? "No cached records for this range" : "No matching transactions"}</h3>
 
             <p>
-              {sales.length === 0 ? "Completed sales will appear here." : "Try a different date range."}
+              {!hasSnapshot || fromCache ? "Checking available records in the background. Connect to verify sales history." : "Try a different date range."}
             </p>
           </div>
 
@@ -393,7 +447,7 @@ function SalesHistory() {
           /* SALES LIST */
           <div className="sales-history-list">
 
-            {filteredSales.map((sale) => (
+            {filteredSales.slice(0, visibleCount).map((sale) => (
               <div
                 className="sale-history-item"
                 key={sale.id}
@@ -413,7 +467,7 @@ function SalesHistory() {
                     </strong>
 
                     <p>
-                      {formatDate(sale.createdAt)}
+                      {formatDate(sale.createdAt)} {sale.pendingSync && <span className="sale-pending-tag">Pending sync</span>}
                     </p>
 
                   </div>
@@ -440,7 +494,7 @@ function SalesHistory() {
                 </div>
               </div>
             ))}
-
+            {visibleCount < filteredSales.length && <button className="sales-load-more" type="button" onClick={() => setVisibleCount((count) => count + 50)}>Show more ({filteredSales.length - visibleCount} remaining)</button>}
           </div>
         )}
       </div>
@@ -460,10 +514,10 @@ function SalesHistory() {
         <div className="sale-delete-overlay">
           <div className="sale-delete-dialog" role="dialog" aria-modal="true" aria-label="Delete sale">
             <h3>Delete sale?</h3>
-            <p>Sale #{deleteTarget.saleId || deleteTarget.id} will be permanently removed. Inventory stock will not be restored.</p>
+            <p>Sale #{deleteTarget.saleId || deleteTarget.id} will be removed from sales history only. The sales collection and inventory stock will not be changed. Offline deletion will synchronize when connected.</p>
             <div className="sale-delete-buttons">
-              <button disabled={deleting} onClick={() => setDeleteTarget(null)}>Cancel</button>
-              <button className="sale-delete-confirm" disabled={deleting} onClick={handleDeleteSale}>{deleting ? "Deleting..." : "Delete"}</button>
+              <button onClick={() => setDeleteTarget(null)}>Cancel</button>
+              <button className="sale-delete-confirm" onClick={handleDeleteSale}>Delete</button>
             </div>
           </div>
         </div>, document.body)}

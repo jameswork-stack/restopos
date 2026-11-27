@@ -2,15 +2,15 @@ import { useEffect, useRef, useState } from "react";
 
 import {
   collection,
-  getDocs,
-  getDocsFromCache,
+  onSnapshot,
+  getDocFromCache,
+  increment,
   serverTimestamp,
   doc,
   writeBatch,
-  runTransaction,
 } from "firebase/firestore";
 
-import { db } from "../../firebase/config";
+import { auth, db } from "../../firebase/config";
 import "./BarcodeScanner.css";
 import { useCart } from "../../context/CartContext";
 import { getCurrentUserInfo } from "../../services/authService";
@@ -21,6 +21,62 @@ function BarcodeScanner() {
   // =========================
 
   const [products, setProducts] = useState([]);
+  const checkoutLock = useRef(false);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [fromCache, setFromCache] = useState(true);
+  const [catalogError, setCatalogError] = useState("");
+  const [journal, setJournal] = useState([]);
+  const journalRef = useRef([]);
+  const journalKey = `barcode-sales-v1:${db.app.options.projectId}:${auth.currentUser?.uid || "none"}`;
+
+  // Keep unresolved receipt details on this device even after a reload.
+  const updateJournal = (transform) => {
+    const previous = JSON.parse(localStorage.getItem(journalKey) || "[]");
+    const next = transform(previous);
+    localStorage.setItem(journalKey, JSON.stringify(next));
+    journalRef.current = next;
+    setJournal(next);
+  };
+
+  useEffect(() => {
+    const connectionChanged = () => setOnline(navigator.onLine);
+    const reloadJournal = () => {
+      try {
+        const entries = JSON.parse(localStorage.getItem(journalKey) || "[]");
+        journalRef.current = entries;
+        setJournal(entries);
+      } catch (error) {
+        setCatalogError("Local sale recovery storage is unavailable.");
+      }
+    };
+    reloadJournal();
+    window.addEventListener("online", connectionChanged);
+    window.addEventListener("offline", connectionChanged);
+    window.addEventListener("storage", reloadJournal);
+    return () => {
+      window.removeEventListener("online", connectionChanged);
+      window.removeEventListener("offline", connectionChanged);
+      window.removeEventListener("storage", reloadJournal);
+    };
+  }, [journalKey]);
+
+  // Reconcile sales left pending by a previous visit, without resubmitting them.
+  const pendingIds = journal.filter((entry) => entry.status === "pending").map((entry) => entry.id).join(",");
+  useEffect(() => {
+    const stops = pendingIds.split(",").filter(Boolean).map((id) =>
+      onSnapshot(doc(db, "sales", id), { includeMetadataChanges: true }, (snapshot) => {
+        if (snapshot.metadata.fromCache || snapshot.metadata.hasPendingWrites) return;
+        try {
+          updateJournal((entries) => snapshot.exists()
+            ? entries.filter((entry) => entry.id !== id)
+            : entries.map((entry) => entry.id === id ? { ...entry, status: "review", error: "Sale not found on server. Verify before retrying." } : entry));
+        } catch (error) { console.error("Sale recovery update failed", error); }
+      }, (error) => {
+        console.error("Unable to verify pending sale", error);
+      })
+    );
+    return () => stops.forEach((stop) => stop());
+  }, [pendingIds, journalKey]);
   const [quantityModal, setQuantityModal] = useState(null);
 const [quantityValue, setQuantityValue] = useState("");
   const [loadingProducts, setLoadingProducts] =
@@ -107,8 +163,6 @@ const handlePaymentConfirmation = () => {
   // =========================
 
   if (paymentMethod === "gcash") {
-    setPaymentModal(false);
-
     completeSaleWithPayment({
       gcashAmount: total,
       paymentMethod: "GCash Only",
@@ -152,8 +206,6 @@ const handlePaymentConfirmation = () => {
       return;
     }
 
-    setPaymentModal(false);
-
     completeSaleWithPayment({
       gcashAmount: gcash,
       cashAmount: cash,
@@ -165,19 +217,30 @@ const handlePaymentConfirmation = () => {
 
 
 
-const openQuantityModal = (item) => { const product = products.find( (product) => String(product.productId).trim().toLowerCase() === String(item.productId).trim().toLowerCase() ); if (!product) { alert("Product information could not be found."); return; } const currentStock = Number(product.stock) || 0; setQuantityModal({ productId: item.productId, productName: item.productName, currentStock, trackStock: product.trackStock !== false, }); setQuantityValue(String(item.quantity)); }; const closeQuantityModal = () => { setQuantityModal(null); setQuantityValue(""); }; const handleSetQuantity = () => { if (!quantityModal) { return; } const quantity = Number(quantityValue); const currentStock = Number(quantityModal.currentStock) || 0; if (!quantityValue || !Number.isInteger(quantity)) { alert("Please enter a whole number."); return; } if (quantity < 1) { alert("Quantity must be at least 1."); return; } if (quantityModal.trackStock && currentStock <= 0) { alert("This product is currently out of stock."); return; } if (quantityModal.trackStock && quantity > currentStock) { alert( `You cannot set the quantity to ${quantity}. Only ${currentStock} item(s) are currently in stock.` ); return; } setQuantity( quantityModal.productId, quantity ); closeQuantityModal(); setMessage( `Quantity updated to ${quantity}.` ); setMessageType("success"); };
+const openQuantityModal = (item) => { const product = products.find( (product) => String(product.productId).trim().toLowerCase() === String(item.productId).trim().toLowerCase() ); if (!product) { alert("Product information could not be found."); return; } const currentStock = Number(product.stock) || 0; setQuantityModal({ productId: item.productId, productName: item.productName, currentStock, trackStock: product.trackStock !== false, }); setQuantityValue(String(item.quantity)); }; const closeQuantityModal = () => { setQuantityModal(null); setQuantityValue(""); }; const handleSetQuantity = () => { if (checkoutLock.current) return; if (!quantityModal) { return; } const quantity = Number(quantityValue); const currentStock = Number(quantityModal.currentStock) || 0; if (!quantityValue || !Number.isInteger(quantity)) { alert("Please enter a whole number."); return; } if (quantity < 1) { alert("Quantity must be at least 1."); return; } if (quantityModal.trackStock && currentStock <= 0) { alert("This product is currently out of stock."); return; } if (quantityModal.trackStock && quantity > currentStock) { alert( `You cannot set the quantity to ${quantity}. Only ${currentStock} item(s) are currently in stock.` ); return; } setQuantity( quantityModal.productId, quantity ); closeQuantityModal(); setMessage( `Quantity updated to ${quantity}.` ); setMessageType("success"); };
 
-  const completeOfflineSale = async (userInfo, finalGcashAmount, finalCashAmount, paymentMethod, changeAmount) => {
+  const completeQueuedSale = async (userInfo, finalGcashAmount, finalCashAmount, paymentMethod, changeAmount) => {
     const batch = writeBatch(db);
-    const productDetails = cart.map((item) => {
-      const product = products.find((entry) =>
-        entry.id === item.id ||
-        String(entry.productId).trim().toLowerCase() ===
-          String(item.productId).trim().toLowerCase()
-      );
+    const seen = new Set();
+    // Read the latest local inventory, including previous pending deductions.
+    let cacheTimer;
+    const cachedProducts = await Promise.race([
+      Promise.all(cart.map(async (item) => {
+        const listed = products.find((entry) => entry.id === item.id ||
+          String(entry.productId).trim().toLowerCase() === String(item.productId).trim().toLowerCase());
+        if (!listed?.id) throw new Error(`Product ${item.productName} is not available locally.`);
+        const snapshot = await getDocFromCache(doc(db, "products", listed.id));
+        return snapshot.exists() ? { ...snapshot.data(), id: snapshot.id } : null;
+      })),
+      new Promise((_, reject) => { cacheTimer = setTimeout(() => reject(new Error("Local inventory lookup timed out. Please retry.")), 4000); }),
+    ]).finally(() => clearTimeout(cacheTimer));
+    const productDetails = cart.map((item, index) => {
+      const product = cachedProducts[index];
       if (!product) {
         throw new Error(`Product "${item.productName}" is not available in the offline product list.`);
       }
+      if (seen.has(product.id)) throw new Error("Duplicate cart product. Merge quantities before checkout.");
+      seen.add(product.id);
       const trackStock = product.trackStock !== false;
       const currentStock = Number(product.stock) || 0;
       const currentProductCost = Number(product.productCost) || 0;
@@ -192,10 +255,12 @@ const openQuantityModal = (item) => { const product = products.find( (product) =
 
       const costPerItem = !trackStock
         ? Number(product.costPerItem ?? product.productCost ?? 0)
-        : Number(product.costPerItem) ||
-          (currentStock > 0 ? currentProductCost / currentStock : 0);
+        : (currentStock > 0 ? currentProductCost / currentStock : 0);
+      if (!Number.isFinite(sellingPrice) || sellingPrice < 0 || !Number.isFinite(costPerItem) || costPerItem < 0) {
+        throw new Error(`Invalid price or cost for "${item.productName}".`);
+      }
       const subtotal = sellingPrice * quantity;
-      const costOfGoodsSold = costPerItem * quantity;
+      const costOfGoodsSold = Number((costPerItem * quantity).toFixed(2));
       const itemProfit = subtotal - costOfGoodsSold;
       const newStock = trackStock ? currentStock - quantity : currentStock;
       const newProductCost = trackStock
@@ -224,6 +289,9 @@ const openQuantityModal = (item) => { const product = products.find( (product) =
     });
 
     const totalSales = Number(productDetails.reduce((sum, product) => sum + product.subtotal, 0).toFixed(2));
+    if (Math.round(totalSales * 100) !== Math.round(Number(cartTotal) * 100)) {
+      throw new Error("Product prices changed. Refresh the cart before completing payment.");
+    }
     const totalCostOfGoodsSold = Number(productDetails.reduce((sum, product) => sum + product.costOfGoodsSold, 0).toFixed(2));
     const totalProfit = Number(productDetails.reduce((sum, product) => sum + product.itemProfit, 0).toFixed(2));
     const saleItems = productDetails.map((product) => ({
@@ -242,13 +310,16 @@ const openQuantityModal = (item) => { const product = products.find( (product) =
     const saleRef = doc(collection(db, "sales"));
     const saleActivityRef = doc(collection(db, "saleActivity"));
     const completedAt = new Date();
+    if (productDetails.filter((product) => product.trackStock).length * 2 + 2 > 500) {
+      throw new Error("Too many products in one sale. Split the cart into smaller sales.");
+    }
     for (const product of productDetails) {
       if (!product.trackStock) continue;
       batch.update(doc(db, "products", product.product.id), {
-        stock: product.newStock,
-        productCost: product.newProductCost,
-        costPerItem: Number(product.newCostPerItem.toFixed(2)),
-        profitPerItem: Number(product.newProfitPerItem.toFixed(2)),
+        // Atomic deltas avoid overwriting another terminal's stock deduction.
+        // Preserve the average unit cost; a sale does not change acquisition cost.
+        stock: increment(-product.quantity),
+        productCost: increment(Number((product.newProductCost - product.currentProductCost).toFixed(2))),
         updatedAt: serverTimestamp(),
       });
       batch.set(doc(collection(db, "stockMovements")), {
@@ -267,7 +338,8 @@ const openQuantityModal = (item) => { const product = products.find( (product) =
         userId: userInfo.userId,
         email: userInfo.email,
         role: userInfo.role,
-        createdAt: serverTimestamp(),
+        createdAt: completedAt,
+        saleId: saleRef.id,
       });
     }
 
@@ -301,11 +373,48 @@ const openQuantityModal = (item) => { const product = products.find( (product) =
       role: userInfo.role,
       createdAt: completedAt,
     });
-    const syncPromise = batch.commit();
-    void syncPromise.catch((error) => {
-      console.error("Could not sync offline sale:", error);
-      setMessage("Firestore rejected the sale sync. Verify the sale before trying again.");
-      setMessageType("error");
+    // Recovery record first: do not take payment if local storage is unavailable.
+    updateJournal((entries) => [...entries, {
+      id: saleRef.id, status: "pending", completedAt: completedAt.toISOString(),
+      total: totalSales, items: saleItems, paymentMethod,
+      cashAmount: finalCashAmount, gcashAmount: finalGcashAmount,
+      change: changeAmount, costOfGoodsSold: totalCostOfGoodsSold, profit: totalProfit,
+    }]);
+
+    // Resolve as soon as Firestore exposes the local mutation, not when the
+    // backend responds. Never start a second write on a network timeout.
+    await new Promise((resolve, reject) => {
+      let accepted = false;
+      let timedOut = false;
+      let stop = () => {};
+      const finish = () => { accepted = true; clearTimeout(timer); stop(); resolve(); };
+      const timer = setTimeout(() => {
+        timedOut = true;
+        stop();
+        try { updateJournal((entries) => entries.map((entry) => entry.id === saleRef.id ? { ...entry, status: "review", error: "Local confirmation timed out. Sale may still sync." } : entry)); } catch (error) { console.error(error); }
+        reject(new Error(`Sale ${saleRef.id} is still awaiting local confirmation. Do not charge or submit again; check Sale Sync Status.`));
+      }, 8000);
+      const fail = (error) => {
+        try {
+          updateJournal((entries) => entries.map((entry) => entry.id === saleRef.id
+            ? { ...entry, status: "review", error: error.message || "Write rejected" } : entry));
+        } catch (storageError) { console.error(storageError); }
+        if (!accepted) { clearTimeout(timer); stop(); reject(error); }
+      };
+      try {
+        const syncPromise = batch.commit();
+        stop = onSnapshot(saleRef, { includeMetadataChanges: true }, (snapshot) => {
+          if (snapshot.exists()) finish();
+        }, (error) => {
+          // A listener error does not establish that the write failed.
+          console.error("Local sale confirmation unavailable", error);
+        });
+        syncPromise.then(() => {
+          try { if (!timedOut) updateJournal((entries) => entries.filter((entry) => entry.id !== saleRef.id)); }
+          catch (error) { console.error(error); }
+          finish();
+        }, fail);
+      } catch (error) { fail(error); }
     });
 
     return {
@@ -333,6 +442,12 @@ const completeSaleWithPayment = async ({
   cashAmount = 0,
   paymentMethod = "Cash Only",
 }) => {
+  if (checkoutLock.current) return;
+  if (journalRef.current.some((entry) => entry.status === "review")) {
+    setMessage("Review the unresolved sale before starting another checkout.");
+    setMessageType("error");
+    return;
+  }
   // ==========================================
   // CHECK CART
   // ==========================================
@@ -427,14 +542,21 @@ const completeSaleWithPayment = async ({
     }
   }
 
+  checkoutLock.current = true;
   try {
     setSavingSale(true);
+    setMessage("");
 
     // ==========================================
     // GET USER INFORMATION
     // ==========================================
 
-    const userInfo = await getCurrentUserInfo();
+    let profileTimer;
+    const userInfo = await Promise.race([
+      getCurrentUserInfo(),
+      new Promise((_, reject) => { profileTimer = setTimeout(() => reject(new Error("Local account lookup timed out. Please retry.")), 4000); }),
+    ]).finally(() => clearTimeout(profileTimer));
+    if (!["admin", "staff"].includes(userInfo.role)) throw new Error("No cached account role. Sign in online before selling.");
 
     // ==========================================
     // CALCULATE CHANGE
@@ -464,553 +586,9 @@ const completeSaleWithPayment = async ({
     // FIRESTORE TRANSACTION
     // ==========================================
 
-    let saleReference;
-    if (typeof navigator !== "undefined" && !navigator.onLine) {
-      saleReference = await completeOfflineSale(
-        userInfo,
-        finalGcashAmount,
-        finalCashAmount,
-        paymentMethod,
-        changeAmount
-      );
-    } else {
-      try {
-        saleReference = await runTransaction(
-          db,
-          async (transaction) => {
-        const productReferences = [];
-
-        let totalSales = 0;
-        let totalProfit = 0;
-        let totalCostOfGoodsSold = 0;
-
-        // ==========================================
-        // CHECK ALL PRODUCTS FIRST
-        // ==========================================
-
-        for (const item of cart) {
-          if (!item.id) {
-            throw new Error(
-              `Product "${item.productName}" is missing its database ID.`
-            );
-          }
-
-          const productRef = doc(
-            db,
-            "products",
-            item.id
-          );
-
-          const productSnapshot =
-            await transaction.get(productRef);
-
-          if (!productSnapshot.exists()) {
-            throw new Error(
-              `Product "${item.productName}" was not found.`
-            );
-          }
-
-          const productData =
-            productSnapshot.data();
-          const trackStock = productData.trackStock !== false;
-
-          // ==========================================
-          // CURRENT PRODUCT VALUES
-          // ==========================================
-
-          const currentStock =
-            Number(productData.stock) || 0;
-
-          const currentProductCost =
-            Number(productData.productCost) || 0;
-
-          const sellingPrice =
-            Number(productData.sellingPrice) || 0;
-
-          /*
-            Use saved costPerItem.
-
-            For older products that do not have
-            costPerItem, calculate:
-
-            productCost / stock
-          */
-
-          const currentCostPerItem =
-            !trackStock ? Number(productData.costPerItem ?? productData.productCost ?? 0) :
-            Number(productData.costPerItem) ||
-            (
-              currentStock > 0
-                ? currentProductCost / currentStock
-                : 0
-            );
-
-          const saleQuantity =
-            Number(item.quantity) || 0;
-
-          // ==========================================
-          // VALIDATE QUANTITY
-          // ==========================================
-
-          if (!Number.isSafeInteger(saleQuantity) || saleQuantity <= 0) {
-            throw new Error(
-              `Invalid quantity for "${item.productName}".`
-            );
-          }
-
-          // ==========================================
-          // CHECK STOCK
-          // ==========================================
-
-          if (trackStock && currentStock < saleQuantity) {
-            throw new Error(
-              `Not enough stock for "${item.productName}". Available: ${currentStock}, requested: ${saleQuantity}.`
-            );
-          }
-
-          // ==========================================
-          // CALCULATE SALE
-          // ==========================================
-
-          const subtotal =
-            sellingPrice * saleQuantity;
-
-          const costOfGoodsSold =
-            currentCostPerItem * saleQuantity;
-
-          const itemProfit =
-            subtotal - costOfGoodsSold;
-
-          // ==========================================
-          // NEW INVENTORY VALUES
-          // ==========================================
-
-          const newStock =
-            trackStock ? currentStock - saleQuantity : currentStock;
-
-          /*
-            Remove the cost of the sold items
-            from the current inventory cost.
-          */
-
-          let newProductCost =
-            trackStock ? currentProductCost - costOfGoodsSold : currentProductCost;
-
-          // Prevent negative floating-point values
-          if (newProductCost < 0) {
-            newProductCost = 0;
-          }
-
-          newProductCost =
-            Number(newProductCost.toFixed(2));
-
-          /*
-            Recalculate remaining average cost.
-          */
-
-          const newCostPerItem =
-            newStock > 0
-              ? newProductCost / newStock
-              : 0;
-
-          /*
-            Selling price stays the same.
-
-            Profit per item is based on the
-            cost at the time of the sale.
-          */
-
-          const newProfitPerItem =
-            sellingPrice - currentCostPerItem;
-
-          // ==========================================
-          // ADD TO SALE TOTALS
-          // ==========================================
-
-          totalSales += subtotal;
-
-          totalCostOfGoodsSold +=
-            costOfGoodsSold;
-
-          totalProfit += itemProfit;
-
-          // ==========================================
-          // SAVE PRODUCT INFORMATION FOR UPDATE
-          // ==========================================
-
-          productReferences.push({
-            ref: productRef,
-            trackStock,
-
-            productId:
-              productData.productId,
-
-            productName:
-              productData.productName,
-
-            previousStock:
-              currentStock,
-
-            quantity:
-              saleQuantity,
-
-            newStock,
-
-            previousProductCost:
-              currentProductCost,
-
-            costOfGoodsSold,
-
-            newProductCost,
-
-            costPerItem:
-              currentCostPerItem,
-
-            sellingPrice,
-
-            profitPerItem:
-              newProfitPerItem,
-
-            itemProfit,
-
-            subtotal,
-
-            newCostPerItem,
-
-            newProfitPerItem,
-          });
-        }
-
-        // ==========================================
-        // ROUND TOTALS
-        // ==========================================
-
-        totalSales =
-          Number(totalSales.toFixed(2));
-
-        totalCostOfGoodsSold =
-          Number(totalCostOfGoodsSold.toFixed(2));
-
-        totalProfit =
-          Number(totalProfit.toFixed(2));
-
-        // ==========================================
-        // UPDATE PRODUCTS
-        // ==========================================
-
-        for (const product of productReferences) {
-          if (!product.trackStock) continue;
-          transaction.update(
-            product.ref,
-            {
-              // Decrease stock
-              stock:
-                product.newStock,
-
-              // Decrease total inventory cost
-              productCost:
-                product.newProductCost,
-
-              // Remaining average cost per item
-              costPerItem:
-                Number(
-                  product.newCostPerItem.toFixed(2)
-                ),
-
-              // Expected profit per item
-              profitPerItem:
-                Number(
-                  product.newProfitPerItem.toFixed(2)
-                ),
-
-              updatedAt:
-                serverTimestamp(),
-            }
-          );
-        }
-
-        // ==========================================
-        // PREPARE SALE ITEMS
-        // ==========================================
-
-        const saleItems =
-          productReferences.map((product) => ({
-            trackStock: product.trackStock,
-            productId:
-              product.productId,
-
-            productName:
-              product.productName,
-
-            sellingPrice:
-              Number(
-                product.sellingPrice.toFixed(2)
-              ),
-
-            costPerItem:
-              Number(
-                product.costPerItem.toFixed(2)
-              ),
-
-            profitPerItem:
-              Number(
-                product.profitPerItem.toFixed(2)
-              ),
-
-            quantity:
-              product.quantity,
-
-            subtotal:
-              Number(
-                product.subtotal.toFixed(2)
-              ),
-
-            costOfGoodsSold:
-              Number(
-                product.costOfGoodsSold.toFixed(2)
-              ),
-
-            profit:
-              Number(
-                product.itemProfit.toFixed(2)
-              ),
-          }));
-
-        // ==========================================
-        // CREATE SALE DOCUMENT
-        // ==========================================
-
-        const saleRef = doc(
-          collection(db, "sales")
-        );
-
-        transaction.set(
-          saleRef,
-          {
-            // Products sold
-            items: saleItems,
-
-            // Total revenue
-            total: totalSales,
-
-            // Cost of products sold
-            costOfGoodsSold:
-              totalCostOfGoodsSold,
-
-            // Gross profit
-            profit:
-              totalProfit,
-
-            // Payment information
-            paymentMethod,
-
-            gcashAmount:
-              finalGcashAmount,
-
-            cashAmount:
-              finalCashAmount,
-
-            change:
-              changeAmount,
-
-            // User information
-            userId:
-              userInfo.userId,
-
-            email:
-              userInfo.email,
-
-            role:
-              userInfo.role,
-
-            completedAt:
-              serverTimestamp(),
-          }
-        );
-
-        // ==========================================
-        // CREATE STOCK MOVEMENTS
-        // ==========================================
-
-        for (const product of productReferences) {
-          if (!product.trackStock) continue;
-          const stockMovementRef =
-            doc(
-              collection(
-                db,
-                "stockMovements"
-              )
-            );
-
-          transaction.set(
-            stockMovementRef,
-            {
-              productId:
-                product.productId,
-
-              productName:
-                product.productName,
-
-              action:
-                "remove",
-
-              quantity:
-                product.quantity,
-
-              previousStock:
-                product.previousStock,
-
-              newStock:
-                product.newStock,
-
-              previousCost:
-                Number(
-                  product.previousProductCost.toFixed(2)
-                ),
-
-              costAmount:
-                Number(
-                  product.costOfGoodsSold.toFixed(2)
-                ),
-
-              newCost:
-                Number(
-                  product.newProductCost.toFixed(2)
-                ),
-
-              previousCostPerItem:
-                Number(
-                  product.costPerItem.toFixed(2)
-                ),
-
-              newCostPerItem:
-                Number(
-                  product.newCostPerItem.toFixed(2)
-                ),
-
-              reason:
-                "Sale",
-
-              userId:
-                userInfo.userId,
-
-              email:
-                userInfo.email,
-
-              role:
-                userInfo.role,
-
-              createdAt:
-                serverTimestamp(),
-            }
-          );
-        }
-
-        // ==========================================
-        // CREATE SALE ACTIVITY
-        // ==========================================
-
-        const saleActivityRef =
-          doc(
-            collection(
-              db,
-              "saleActivity"
-            )
-          );
-
-        transaction.set(
-          saleActivityRef,
-          {
-            action:
-              "sale_completed",
-
-            saleId:
-              saleRef.id,
-
-            // Revenue
-            total:
-              totalSales,
-
-            // Cost of products sold
-            costOfGoodsSold:
-              totalCostOfGoodsSold,
-
-            // Gross profit
-            profit:
-              totalProfit,
-
-            // Payment information
-            paymentMethod,
-
-            gcashAmount:
-              finalGcashAmount,
-
-            cashAmount:
-              finalCashAmount,
-
-            change:
-              changeAmount,
-
-            // Products
-            items:
-              saleItems,
-
-            // User information
-            userId:
-              userInfo.userId,
-
-            email:
-              userInfo.email,
-
-            role:
-              userInfo.role,
-
-            createdAt:
-              serverTimestamp(),
-          }
-        );
-
-        // ==========================================
-        // RETURN SALE INFORMATION
-        // ==========================================
-
-        return {
-          saleRef,
-          totalSales,
-          totalCostOfGoodsSold,
-          totalProfit,
-          cashAmount:
-            finalCashAmount,
-          gcashAmount:
-            finalGcashAmount,
-          change:
-            changeAmount,
-          paymentMethod,
-          updatedProducts: productReferences.map((product) => ({
-            id: product.ref.id,
-            stock: product.newStock,
-            productCost: product.newProductCost,
-            costPerItem: Number(product.newCostPerItem.toFixed(2)),
-            profitPerItem: Number(product.newProfitPerItem.toFixed(2)),
-          })),
-        };
-          }
-        );
-      } catch (error) {
-        if (error?.code !== "unavailable" &&
-            error?.code !== "deadline-exceeded" &&
-            !(typeof navigator !== "undefined" && !navigator.onLine)) {
-          throw error;
-        }
-        saleReference = await completeOfflineSale(
-          userInfo,
-          finalGcashAmount,
-          finalCashAmount,
-          paymentMethod,
-          changeAmount
-        );
-      }
-    }
+    const saleReference = await completeQueuedSale(
+      userInfo, finalGcashAmount, finalCashAmount, paymentMethod, changeAmount
+    );
 
     // ==========================================
     // CLEAR CART AFTER SUCCESSFUL TRANSACTION
@@ -1032,7 +610,7 @@ const completeSaleWithPayment = async ({
     // ==========================================
 
     let successMessage =
-      `Sale completed successfully. ` +
+      `Sale recorded on this device. Check sync status for server confirmation. ` +
       `Profit: ₱${saleReference.totalProfit.toLocaleString(
         "en-PH",
         {
@@ -1057,13 +635,6 @@ const completeSaleWithPayment = async ({
 
     setMessage(successMessage);
     setMessageType("success");
-    setProducts((current) => current.map((product) => {
-      const updatedProduct = saleReference.updatedProducts?.find(
-        (entry) => entry.id === product.id
-      );
-      return updatedProduct ? { ...product, ...updatedProduct } : product;
-    }));
-
     // ==========================================
     // CONSOLE LOGS
     // ==========================================
@@ -1120,6 +691,7 @@ const completeSaleWithPayment = async ({
 
     setMessageType("error");
   } finally {
+    checkoutLock.current = false;
     setSavingSale(false);
   }
 };
@@ -1128,40 +700,6 @@ const completeSaleWithPayment = async ({
   // =========================
   // LOAD PRODUCTS
   // =========================
-
-  const loadProducts = async () => {
-    try {
-      setLoadingProducts(true);
-
-      const snapshot = typeof navigator !== "undefined" && !navigator.onLine
-        ? await getDocsFromCache(collection(db, "products"))
-        : await getDocs(collection(db, "products"));
-
-      const productList = snapshot.docs.map(
-        (productDoc) => ({
-          id: productDoc.id,
-          ...productDoc.data(),
-        })
-      );
-
-      setProducts(productList);
-    } catch (error) {
-      console.error("Error loading products from server:", error);
-      try {
-        const cachedSnapshot = await getDocsFromCache(collection(db, "products"));
-        setProducts(cachedSnapshot.docs.map((productDoc) => ({
-          id: productDoc.id,
-          ...productDoc.data(),
-        })));
-      } catch (cacheError) {
-        console.error("Error loading cached products:", cacheError);
-        setMessage("Failed to load products from local storage.");
-        setMessageType("error");
-      }
-    } finally {
-      setLoadingProducts(false);
-    }
-  };
 
   // =========================
   // FIND PRODUCT
@@ -1185,6 +723,7 @@ const completeSaleWithPayment = async ({
   // =========================
 
   const processBarcode = (barcode) => {
+    if (checkoutLock.current || paymentModal) return;
     const cleanBarcode =
       String(barcode).trim();
 
@@ -1246,6 +785,7 @@ const completeSaleWithPayment = async ({
   // =========================
 
   const handleClearCart = () => {
+    if (checkoutLock.current) return;
     if (cart.length === 0) {
       return;
     }
@@ -1348,6 +888,7 @@ const completeSaleWithPayment = async ({
 
   useEffect(() => {
     const handleKeyDown = (event) => {
+      if (checkoutLock.current || paymentModal) return;
       const target = event.target;
 
       /*
@@ -1437,14 +978,27 @@ const completeSaleWithPayment = async ({
         );
       }
     };
-  }, [products]);
+  }, [products, paymentModal, cart]);
 
   // =========================
   // LOAD PRODUCTS
   // =========================
 
   useEffect(() => {
-    loadProducts();
+    setLoadingProducts(true);
+    const timeout = setTimeout(() => setLoadingProducts(false), 4000);
+    const stop = onSnapshot(collection(db, "products"), { includeMetadataChanges: true }, (snapshot) => {
+      clearTimeout(timeout);
+      setProducts(snapshot.docs.map((productDoc) => ({ ...productDoc.data(), id: productDoc.id })));
+      setFromCache(snapshot.metadata.fromCache);
+      setLoadingProducts(false);
+      setCatalogError("");
+    }, (error) => {
+      clearTimeout(timeout);
+      setLoadingProducts(false);
+      setCatalogError(error.message || "Unable to load products.");
+    });
+    return () => { clearTimeout(timeout); stop(); };
   }, []);
 
   const filteredQuickProducts = products.filter((product) => {
@@ -1463,7 +1017,7 @@ const completeSaleWithPayment = async ({
   });
 
   return (
-    <div className="barcode-scanner-page">
+    <div className={`barcode-scanner-page${savingSale ? " scanner-is-saving" : ""}`}>
 
       {/* =========================
           HEADER
@@ -1509,6 +1063,33 @@ const completeSaleWithPayment = async ({
         </div>
 
       </div>
+
+      <section className="scanner-sync-status" aria-live="polite">
+        <strong>Sale Sync Status</strong>
+        <span className={online && !fromCache ? "scanner-sync-live" : "scanner-sync-wait"}>
+          {!online ? "Offline" : fromCache ? "Using cached products" : "Products connected"}
+        </span>
+        <span>{journal.filter((entry) => entry.status === "pending").length} sale(s) awaiting server confirmation</span>
+        {catalogError && <p role="alert">{catalogError}</p>}
+        {!loadingProducts && fromCache && products.length === 0 && <p>No cached products. Connect online to load your inventory.</p>}
+        {journal.filter((entry) => entry.status === "review").map((entry) => (
+          <div className="scanner-sync-error" key={entry.id} role="alert">
+            <strong>Sale needs review: {entry.id}</strong>
+            <p>₱{Number(entry.total).toFixed(2)} · {entry.paymentMethod} · {entry.error}</p>
+            <button type="button" onClick={() => {
+              const blob = new Blob([JSON.stringify(entry, null, 2)], { type: "application/json" });
+              const url = URL.createObjectURL(blob);
+              const link = document.createElement("a"); link.href = url; link.download = `sale-${entry.id}.json`; link.click();
+              setTimeout(() => URL.revokeObjectURL(url), 1000);
+            }}>Download recovery record</button>
+            <button type="button" onClick={() => {
+              if (window.confirm("Have you verified this sale and reconciled payment and stock? This only dismisses the warning; it does not save or retry the sale.")) {
+                updateJournal((entries) => entries.filter((item) => item.id !== entry.id));
+              }
+            }}>Mark reviewed</button>
+          </div>
+        ))}
+      </section>
 
       {/* =========================
           BLUETOOTH STATUS
@@ -1805,7 +1386,8 @@ const completeSaleWithPayment = async ({
                     <button
                       type="button"
                       className="remove-cart-btn"
-                      onClick={() => removeFromCart(item.productId)}
+                      disabled={savingSale}
+                      onClick={() => { if (!checkoutLock.current) removeFromCart(item.productId); }}
                     >
                       Remove
                     </button>
@@ -1867,7 +1449,7 @@ const completeSaleWithPayment = async ({
   type="button"
   className="payment-method-btn"
   onClick={() => setPaymentModal(true)}
-  disabled={cart.length === 0}
+  disabled={cart.length === 0 || savingSale || loadingProducts || !!catalogError}
 >
   Payment Method
 </button>
@@ -1941,6 +1523,7 @@ const completeSaleWithPayment = async ({
                       key={product.id || product.productId}
                       disabled={product.trackStock !== false && stock <= 0}
                       onClick={() => {
+                        if (checkoutLock.current) return;
                         addToCart(product);
                         setQuickProductsModal(false);
                         setQuickProductSearch("");
@@ -2098,6 +1681,7 @@ const completeSaleWithPayment = async ({
         <button
           type="button"
           className="payment-close-btn"
+          disabled={savingSale}
           onClick={() => {
             setPaymentModal(false);
             setPaymentMethod("");
@@ -2109,6 +1693,8 @@ const completeSaleWithPayment = async ({
         </button>
       </div>
 
+      {messageType === "error" && message && <p className="scanner-payment-error" role="alert">{message}</p>}
+      {savingSale && <p className="scanner-payment-progress" role="status">Recording sale locally...</p>}
       <div className="payment-total">
         <span>Total Payable</span>
         <strong>
@@ -2189,6 +1775,7 @@ const completeSaleWithPayment = async ({
             <button
               type="button"
               className="payment-back-btn"
+              disabled={savingSale}
               onClick={() => setPaymentMethod("")}
             >
               Back
@@ -2197,6 +1784,7 @@ const completeSaleWithPayment = async ({
             <button
               type="button"
               className="payment-confirm-btn"
+              disabled={savingSale}
               onClick={() => handlePaymentConfirmation()}
             >
               OK
@@ -2346,6 +1934,7 @@ const completeSaleWithPayment = async ({
             <button
               type="button"
               className="payment-back-btn"
+              disabled={savingSale}
               onClick={() => {
                 setPaymentMethod("");
                 setGcashAmount("");
@@ -2358,6 +1947,7 @@ const completeSaleWithPayment = async ({
             <button
               type="button"
               className="payment-confirm-btn"
+              disabled={savingSale}
               onClick={() => handlePaymentConfirmation()}
             >
               Confirm Payment

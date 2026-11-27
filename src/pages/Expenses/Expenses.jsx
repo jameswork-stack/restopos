@@ -1,13 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo, useRef, useSyncExternalStore } from "react";
 import {
   collection,
-  getDocs,
+  onSnapshot,
   getDocsFromCache,
   doc,
   writeBatch,
 } from "firebase/firestore";
 
-import { db } from "../../firebase/config";
+import { auth, db } from "../../firebase/config";
+import { onAuthStateChanged } from "firebase/auth";
 import { getCurrentUserInfo } from "../../services/authService";
 import "./expenses.css";
 
@@ -15,15 +16,82 @@ const toDate = (timestamp) => {
   if (typeof timestamp?.toDate === "function") {
     return timestamp.toDate();
   }
+  if (timestamp == null) return null;
   const date = new Date(timestamp);
   return Number.isNaN(date.getTime()) ? null : date;
 };
+
+// Shared, account-scoped memory cache survives React route unmounts.
+// Firestore remains the persistent offline storage and source of truth.
+const stores = new Map();
+const sortExpenses = (rows) => [...rows].sort((a, b) =>
+  (toDate(b.createdAt)?.getTime() || 0) - (toDate(a.createdAt)?.getTime() || 0));
+function getStore(uid) {
+  if (!stores.has(uid)) {
+    const listeners = new Set();
+    const store = {
+      rows: [], pending: new Map(),
+      state: { expenses: [], ready: false, fromCache: true, error: "", feedback: null, pendingCount: 0 },
+      subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
+      getSnapshot: () => store.state,
+      publish: (patch = {}) => {
+        const rows = new Map(store.rows.map((row) => [row.id, row]));
+        for (const [id, operation] of store.pending) {
+          if (operation.type === "delete") rows.delete(id);
+          else rows.set(id, { ...operation.row, pendingSync: true });
+        }
+        store.state = { ...store.state, ...patch, expenses: sortExpenses([...rows.values()]), pendingCount: store.pending.size };
+        listeners.forEach((fn) => fn());
+      },
+    };
+    stores.set(uid, store);
+  }
+  return stores.get(uid);
+}
+const snapshotRows = (snapshot) => snapshot.docs.map((entry) => ({
+  ...entry.data({ serverTimestamps: "estimate" }), id: entry.id,
+  pendingSync: entry.metadata.hasPendingWrites,
+}));
+
+// A write promise resolves only after the server acknowledges it. Never await
+// it in the UI. Preserve pending operations and feedback across navigation.
+function queueExpenseWrite(store, id, operation, batch) {
+  const promise = batch.commit();
+  store.pending.set(id, operation);
+  store.publish({ ready: true, feedback: { type: "pending", text: "Change queued locally. Awaiting Firebase confirmation." } });
+  void promise.then(() => {
+    store.rows = store.rows.filter((row) => row.id !== id);
+    if (operation.type === "add") store.rows.push({ ...operation.row, pendingSync: false });
+    store.pending.delete(id);
+    store.publish({ feedback: { type: "success", text: "Expense change confirmed by Firebase." } });
+  }).catch((error) => {
+    console.error("Expense write rejected:", error);
+    store.pending.delete(id);
+    store.rows = store.rows.filter((row) => row.id !== id);
+    if (operation.type === "delete") store.rows.push(operation.row);
+    store.publish({ feedback: { type: "error", text: `Expense ${operation.type} failed (${error.code || "unknown error"}). Verify the record and permissions before retrying.` } });
+  });
+}
 
 function Expenses() {
   // =========================
   // EXPENSE DATA
   // =========================
-  const [expenses, setExpenses] = useState([]);
+  const [uid, setUid] = useState(() => auth.currentUser?.uid || "");
+  useEffect(() => onAuthStateChanged(auth, (user) => setUid(user?.uid || "")), []);
+  const store = getStore(uid);
+  const { expenses, ready, fromCache, error: syncError, feedback: saveFeedback, pendingCount } = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const [retry, setRetry] = useState(0);
+  const [online, setOnline] = useState(() => navigator.onLine);
+  const [initialWait, setInitialWait] = useState(true);
+  const loadingExpenses = !ready && initialWait;
+  const writeLock = useRef(false);
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => { window.removeEventListener("online", update); window.removeEventListener("offline", update); };
+  }, []);
 
   // =========================
   // FORM
@@ -38,65 +106,55 @@ function Expenses() {
   // =========================
   // LOADING STATES
   // =========================
-  const [loadingExpenses, setLoadingExpenses] =
-    useState(true);
+
 
   const [savingExpense, setSavingExpense] =
     useState(false);
-  const [saveFeedback, setSaveFeedback] = useState(null);
+
 
     const [dateFrom, setDateFrom] = useState("");
 const [dateTo, setDateTo] = useState("");
-const [deletingExpense, setDeletingExpense] = useState(null);
+
 const [deletingExpenseLoading, setDeletingExpenseLoading] =
   useState(false);
 
   // =========================
   // LOAD EXPENSES
   // =========================
-  const loadExpenses = async () => {
-    try {
-      setLoadingExpenses(true);
-
-      let querySnapshot;
-      try {
-        querySnapshot = typeof navigator !== "undefined" && !navigator.onLine
-          ? await getDocsFromCache(collection(db, "expenses"))
-          : await getDocs(collection(db, "expenses"));
-      } catch (error) {
-        console.error("Error loading expenses from Firestore:", error);
-        querySnapshot = await getDocsFromCache(collection(db, "expenses"));
+  useEffect(() => {
+    if (!uid) { setInitialWait(false); return; }
+    let active = true;
+    let receivedSnapshot = false;
+    setInitialWait(!store.state.ready);
+    store.publish({ fromCache: true, error: "" });
+    const timer = setTimeout(() => { if (active) setInitialWait(false); }, 1200);
+    const ref = collection(db, "expenses");
+    // Read persistent cache immediately, without depending on network status.
+    void getDocsFromCache(ref).then((snapshot) => {
+      if (!active || receivedSnapshot) return;
+      if (snapshot.size || !store.state.ready) {
+        store.rows = snapshotRows(snapshot);
+        store.publish({ ready: true, fromCache: true });
       }
+    }).catch(() => {});
+    const unsubscribe = onSnapshot(ref, { includeMetadataChanges: true }, (snapshot) => {
+      if (!active) return;
+      receivedSnapshot = true;
+      clearTimeout(timer);
+      store.rows = snapshotRows(snapshot);
+      store.publish({ ready: true, fromCache: snapshot.metadata.fromCache, error: "" });
+      setInitialWait(false);
+    }, (error) => {
+      if (!active) return;
+      clearTimeout(timer);
+      if (["permission-denied", "unauthenticated"].includes(error.code)) store.rows = [];
+      store.publish({ error: "Unable to refresh expenses. Check access and connection.", fromCache: true });
+      setInitialWait(false);
+    });
+    return () => { active = false; clearTimeout(timer); unsubscribe(); };
+  }, [uid, store, retry]);
 
-      const expenseList = [];
-
-      querySnapshot.forEach((expenseDoc) => {
-        expenseList.push({
-          id: expenseDoc.id,
-          ...expenseDoc.data(),
-        });
-      });
-
-      // Newest expense first
-      expenseList.sort((a, b) => {
-        const dateA = toDate(a.createdAt) || new Date(0);
-        const dateB = toDate(b.createdAt) || new Date(0);
-
-        return dateB - dateA;
-      });
-
-      setExpenses(expenseList);
-    } catch (error) {
-      console.error(
-        "Error loading expenses:",
-        error
-      );
-    } finally {
-      setLoadingExpenses(false);
-    }
-  };
-
-  const filteredExpenses = expenses.filter((expense) => {
+  const filteredExpenses = useMemo(() => expenses.filter((expense) => {
     const expenseDate = toDate(expense.createdAt);
     if (!expenseDate) return false;
 
@@ -111,7 +169,7 @@ const [deletingExpenseLoading, setDeletingExpenseLoading] =
 
   // Date To
   if (dateTo) {
-    const toDate = new Date(`${dateTo}T23:59:59`);
+    const toDate = new Date(`${dateTo}T23:59:59.999`);
 
     if (expenseDate > toDate) {
       return false;
@@ -119,10 +177,10 @@ const [deletingExpenseLoading, setDeletingExpenseLoading] =
   }
 
   return true;
-});
+}), [expenses, dateFrom, dateTo]);
 
 const handleDeleteExpense = async (expense) => {
-  if (!expense) {
+  if (!expense || writeLock.current || store.pending.has(expense.id)) {
     return;
   }
 
@@ -135,10 +193,12 @@ const handleDeleteExpense = async (expense) => {
   }
 
   try {
+    writeLock.current = true;
     setDeletingExpenseLoading(true);
 
     // Get the user who is deleting the expense
     const userInfo = await getCurrentUserInfo();
+    if (!uid || auth.currentUser?.uid !== uid || userInfo.userId !== uid) throw new Error("Your session changed. Please try again.");
     const deleteBatch = writeBatch(db);
 
     // Record the deletion activity
@@ -159,25 +219,7 @@ const handleDeleteExpense = async (expense) => {
 
     // Delete the expense record
     deleteBatch.delete(doc(db, "expenses", expense.id));
-    const syncPromise = deleteBatch.commit();
-    setExpenses((current) =>
-      current.filter((entry) => entry.id !== expense.id)
-    );
-
-    setSaveFeedback({
-      type: "success",
-      text: "Expense deletion saved on this device. It will sync to Firestore when online.",
-    });
-    void syncPromise.catch((error) => {
-      console.error("Could not sync expense deletion:", error);
-      setExpenses((current) => [expense, ...current]);
-      setSaveFeedback({
-        type: "error",
-        text: "The expense deletion could not sync to Firestore. Check your connection and permissions.",
-      });
-    });
-
-    setDeletingExpense(null);
+    queueExpenseWrite(store, expense.id, { type: "delete", row: expense }, deleteBatch);
 
   } catch (error) {
     console.error(
@@ -187,6 +229,7 @@ const handleDeleteExpense = async (expense) => {
 
     alert("Failed to delete expense.");
   } finally {
+    writeLock.current = false;
     setDeletingExpenseLoading(false);
   }
 };
@@ -194,15 +237,14 @@ const handleDeleteExpense = async (expense) => {
   // =========================
   // LOAD ON PAGE OPEN
   // =========================
-  useEffect(() => {
-    loadExpenses();
-  }, []);
+
 
   // =========================
   // ADD EXPENSE
   // =========================
   const handleAddExpense = async (e) => {
     e.preventDefault();
+    if (writeLock.current) return;
 
     if (!expenseName.trim()) {
       alert("Please enter an expense name.");
@@ -221,7 +263,7 @@ const handleDeleteExpense = async (expense) => {
 
     const amount = Number(expenseAmount);
 
-    if (isNaN(amount) || amount <= 0) {
+    if (!Number.isFinite(amount) || amount <= 0) {
       alert(
         "Expense amount must be greater than 0."
       );
@@ -229,11 +271,12 @@ const handleDeleteExpense = async (expense) => {
     }
 
     try {
+      writeLock.current = true;
       setSavingExpense(true);
-      setSaveFeedback(null);
 
       // Get logged-in user's information
       const userInfo = await getCurrentUserInfo();
+    if (!uid || auth.currentUser?.uid !== uid || userInfo.userId !== uid) throw new Error("Your session changed. Please try again.");
 
       const expenseRef = doc(collection(db, "expenses"));
       const expenseData = {
@@ -252,23 +295,7 @@ const handleDeleteExpense = async (expense) => {
       const savedExpense = { id: expenseRef.id, ...expenseData };
       const expenseBatch = writeBatch(db);
       expenseBatch.set(expenseRef, expenseData);
-      const syncPromise = expenseBatch.commit();
-      setExpenses((current) => [savedExpense, ...current]);
-
-      setSaveFeedback({
-        type: "success",
-        text: "Expense added successfully on this device. It will sync to Firestore when online.",
-      });
-      void syncPromise.catch((error) => {
-        console.error("Could not sync expense:", error);
-        setExpenses((current) =>
-          current.filter((entry) => entry.id !== expenseRef.id)
-        );
-        setSaveFeedback({
-          type: "error",
-          text: "The expense could not sync to Firestore. Check your connection and permissions.",
-        });
-      });
+      queueExpenseWrite(store, expenseRef.id, { type: "add", row: savedExpense }, expenseBatch);
 
       // Clear form
       setExpenseName("");
@@ -289,6 +316,7 @@ const handleDeleteExpense = async (expense) => {
           "Failed to add expense."
       );
     } finally {
+      writeLock.current = false;
       setSavingExpense(false);
     }
   };
@@ -315,6 +343,8 @@ const handleDeleteExpense = async (expense) => {
   // =========================
   // TOTAL EXPENSES
   // =========================
+  const [visibleCount, setVisibleCount] = useState(50);
+  useEffect(() => setVisibleCount(50), [dateFrom, dateTo]);
   const totalExpenses = expenses.reduce(
     (total, expense) => {
       return total + (Number(expense.amount) || 0);
@@ -337,15 +367,6 @@ const handleDeleteExpense = async (expense) => {
             authorized users.
           </p>
         </div>
-        {saveFeedback && (
-          <div
-            className={`expenses-save-feedback ${saveFeedback.type}`}
-            role={saveFeedback.type === "error" ? "alert" : "status"}
-          >
-            {saveFeedback.text}
-          </div>
-        )}
-
         <button
           type="button"
           className="add-expense-button"
@@ -357,6 +378,20 @@ const handleDeleteExpense = async (expense) => {
           Add Expense
         </button>
       </div>
+
+      <div className={`expense-sync-status ${syncError ? "error" : !online || fromCache || pendingCount ? "pending" : "ready"}`} role="status">
+        <div><strong>{syncError ? "Sync unavailable" : !online ? "Offline mode" : fromCache ? "Cached records · refreshing" : "Server synchronized"}</strong>
+          <span>{pendingCount ? `${pendingCount} change(s) awaiting confirmation. ` : ""}{fromCache ? "Cached totals may be incomplete." : ""}</span></div>
+        {syncError && <button type="button" onClick={() => setRetry((value) => value + 1)}>Retry</button>}
+      </div>
+        {saveFeedback && (
+          <div
+            className={`expenses-save-feedback ${saveFeedback.type}`}
+            role={saveFeedback.type === "error" ? "alert" : "status"}
+          >
+            {saveFeedback.text}
+          </div>
+        )}
 
       {/* =========================
           SUMMARY
@@ -372,14 +407,13 @@ const handleDeleteExpense = async (expense) => {
             <span>Total Expenses</span>
 
             <strong>
-              ₱
-              {totalExpenses.toLocaleString(
+              {!ready || (fromCache && !expenses.length) ? "—" : `₱${totalExpenses.toLocaleString(
                 "en-PH",
                 {
                   minimumFractionDigits: 2,
                   maximumFractionDigits: 2,
                 }
-              )}
+              )}`} 
             </strong>
           </div>
         </div>
@@ -393,7 +427,7 @@ const handleDeleteExpense = async (expense) => {
             <span>Expense Records</span>
 
             <strong>
-              {expenses.length}
+              {!ready || (fromCache && !expenses.length) ? "—" : expenses.length}
             </strong>
           </div>
         </div>
@@ -499,7 +533,7 @@ const handleDeleteExpense = async (expense) => {
                 onClick={() =>
                   setShowExpenseForm(false)
                 }
-                disabled={savingExpense}
+                disabled={savingExpense || deletingExpenseLoading}
               >
                 Cancel
               </button>
@@ -507,7 +541,7 @@ const handleDeleteExpense = async (expense) => {
               <button
                 type="submit"
                 className="save-expense-button"
-                disabled={savingExpense}
+                disabled={savingExpense || deletingExpenseLoading}
               >
                 {savingExpense
                   ? "Saving..."
@@ -594,11 +628,11 @@ const handleDeleteExpense = async (expense) => {
             ₱
           </div>
 
-          <h3>{expenses.length === 0 ? "No expenses yet" : "No matching expenses"}</h3>
+          <h3>{expenses.length === 0 ? (fromCache || !ready ? "No cached expenses" : "No expenses yet") : "No matching expenses"}</h3>
 
           <p>
             {expenses.length === 0
-              ? 'Click "Add Expense" to record your first expense.'
+              ? (fromCache || !ready ? 'Connect to the internet to verify expense records.' : 'Click "Add Expense" to record your first expense.')
               : "Try a different date range or clear the filter."}
           </p>
 
@@ -611,7 +645,7 @@ const handleDeleteExpense = async (expense) => {
         ========================= */
         <div className="expense-list">
 
-          {filteredExpenses.map((expense) => (
+          {filteredExpenses.slice(0, visibleCount).map((expense) => (
             <div
               className="expense-item"
               key={expense.id}
@@ -627,7 +661,7 @@ const handleDeleteExpense = async (expense) => {
 
                   <div>
                     <h3>
-                      {expense.expenseName}
+                      {expense.expenseName} {expense.pendingSync && <span className="expense-pending-tag">Pending sync</span>}
                     </h3>
 
                     <p>
@@ -699,7 +733,7 @@ const handleDeleteExpense = async (expense) => {
                 <button
   type="button"
   className="delete-expense-button"
-  disabled={deletingExpenseLoading}
+  disabled={deletingExpenseLoading || savingExpense || expense.pendingSync}
   onClick={() => handleDeleteExpense(expense)}
 >
   Delete
@@ -709,6 +743,7 @@ const handleDeleteExpense = async (expense) => {
 
             </div>
           ))}
+          {visibleCount < filteredExpenses.length && <button type="button" className="expense-load-more" onClick={() => setVisibleCount((count) => count + 50)}>Show more ({filteredExpenses.length - visibleCount} remaining)</button>}
 
         </div>
       )}

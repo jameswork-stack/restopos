@@ -1,71 +1,45 @@
-import { doc, getDoc, getDocFromCache } from "firebase/firestore";
+import { doc, getDocFromServer, getDocFromCache } from "firebase/firestore";
 import { auth, db } from "../firebase/config";
 
-const isNetworkError = (error) =>
-  error?.code === "unavailable" ||
-  error?.code === "deadline-exceeded" ||
-  error?.code === "auth/network-request-failed" ||
-  (typeof navigator !== "undefined" && !navigator.onLine);
+function withTimeout(promise, ms, message) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
 
-export async function getUserRole(user) {
-  if (!user) {
-    throw new Error("You are not signed in.");
+function readRole(snapshot) {
+  if (!snapshot.exists()) throw new Error("User account information was not found.");
+  const role = snapshot.data().role;
+  if (role !== "admin" && role !== "staff") throw new Error("Invalid user role.");
+  return role;
+}
+
+export async function getUserRole(user, { fresh = false } = {}) {
+  if (!user || auth.currentUser?.uid !== user.uid) throw new Error("You are not signed in.");
+  const ref = doc(db, "users", user.uid);
+  const offline = typeof navigator !== "undefined" && !navigator.onLine;
+  if (!fresh) {
+    const cached = await withTimeout(getDocFromCache(ref), 1500, "Local cache timed out.").catch(() => null);
+    if (cached?.exists() && !cached.metadata.hasPendingWrites) return readRole(cached);
   }
-
-  const userRef = doc(db, "users", user.uid);
-  let userSnapshot;
-
-  if (typeof navigator !== "undefined" && !navigator.onLine) {
-    try {
-      userSnapshot = await getDocFromCache(userRef);
-    } catch {
-      throw new Error(
-        "No saved account information is available offline. Connect to the internet and sign in first."
-      );
-    }
-  } else {
-    try {
-      userSnapshot = await getDoc(userRef);
-    } catch (error) {
-      if (!isNetworkError(error)) {
-        throw error;
-      }
-
-      try {
-        userSnapshot = await getDocFromCache(userRef);
-      } catch {
-        throw new Error(
-          "Unable to verify your saved account offline. Reconnect and try again."
-        );
-      }
-    }
-  }
-
-  if (!userSnapshot.exists()) {
-    throw new Error("User account information was not found.");
-  }
-
-  return userSnapshot.data().role;
+  if (offline) throw new Error("No saved account information is available offline. Connect to the internet and try again.");
+  const snapshot = await withTimeout(getDocFromServer(ref), 8000, "Account verification timed out. Check your connection and retry.");
+  if (auth.currentUser?.uid !== user.uid) throw new Error("Your session changed. Please try again.");
+  return readRole(snapshot);
 }
 
 export async function getCurrentUserInfo() {
   const currentUser = auth.currentUser;
-  if (!currentUser) {
-    throw new Error("User is not logged in.");
-  }
-
+  if (!currentUser) throw new Error("User is not logged in.");
   let userData = {};
   try {
-    const userSnapshot = await getDocFromCache(
-      doc(db, "users", currentUser.uid)
-    );
-    if (userSnapshot.exists()) {
-      userData = userSnapshot.data();
-    }
-  } catch {
-    // The signed-in Firebase user is enough to record a local-first action.
-  }
-
+    const snapshot = await getDocFromCache(doc(db, "users", currentUser.uid));
+    if (snapshot.exists()) userData = snapshot.data();
+  } catch { /* Local profile may not be available. */ }
   return {
     userId: currentUser.uid,
     email: userData.email || currentUser.email || "",

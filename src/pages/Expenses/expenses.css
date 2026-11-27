@@ -105,3 +105,16 @@
   .expenses-page .expense-filter-group input { font-size: 13px; padding: 6px; }
 }
 @media (prefers-reduced-motion: reduce) { .expenses-page button { transition: none; } }
+
+/* Cache and background synchronization */
+.expenses-page .expense-sync-status { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 14px; margin-bottom:14px; border:1px solid; border-radius:9px; font-size:13px; overflow-wrap:anywhere; }
+.expenses-page .expense-sync-status strong,.expenses-page .expense-sync-status span { display:block; }
+.expenses-page .expense-sync-status span:not(:empty) { margin-top:4px; }
+.expenses-page .expense-sync-status.ready { background:#ecfdf5; color:#166534; border-color:#bbf7d0; }
+.expenses-page .expense-sync-status.pending,.expenses-page .expenses-save-feedback.pending { background:#fffbeb; color:#92400e; border-color:#fde68a; }
+.expenses-page .expense-sync-status.error { background:#fef2f2; color:#991b1b; border-color:#fecaca; }
+.expenses-page .expenses-save-feedback { margin:0 0 14px; overflow-wrap:anywhere; }
+.expenses-page .expense-sync-status button,.expenses-page .expense-load-more { padding:9px 14px; background:white; color:#334155; border:1px solid #cbd5e1; border-radius:8px; font-size:13px; font-weight:600; }
+.expenses-page .expense-load-more { width:100%; }
+.expenses-page .expense-pending-tag { display:inline-block; padding:3px 6px; font-size:11px; border-radius:5px; background:#fef3c7; color:#92400e; }
+@media(prefers-reduced-motion:reduce) { .expenses-page .expense-loading-spinner { animation:none; } }
