@@ -227,7 +227,9 @@ function SalesHistory() {
   const receiptLines = (sale) => {
     const money = (value) => formatCurrency(value).replace("₱", "PHP ");
     const lines = [
+      { text: "CHILL Karaoke | Food | Beer", center: true, bold: true },
       { text: "SALES RECEIPT", center: true, bold: true },
+      { text: "--------------------------------" },
       { text: "Sale #" + (sale.saleId || sale.id) },
       { text: formatDate(sale.createdAt) },
       { text: "--------------------------------" },
