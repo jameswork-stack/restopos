@@ -1,21 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import {
   collection,
-  addDoc,
   getDocs,
   getDocsFromCache,
-  getDocsFromServer,
   writeBatch,
-  deleteDoc,
   doc,
-  getDocFromCache,
   serverTimestamp,
 } from "firebase/firestore";
 
 import { db } from "../../firebase/config";
 import "./inventory.css";
-import { auth } from "../../firebase/config";
-import { getDoc } from "firebase/firestore";
+import { getCurrentUserInfo } from "../../services/authService";
 
 const isDineIn = (product) => product?.trackStock === false;
 
@@ -31,25 +26,10 @@ function Inventory() {
 
   const checkDuplicateProduct = async (productId, productName, excludeId = null) => {
     let snapshot;
-    if (typeof navigator !== "undefined" && !navigator.onLine) {
-      try {
-        snapshot = await getDocsFromCache(collection(db, "products"));
-      } catch (cacheError) {
-        console.warn("Could not check the Firestore product cache:", cacheError);
-      }
-    } else {
-      try {
-        snapshot = await getDocsFromServer(collection(db, "products"));
-      } catch (error) {
-        if (!isNetworkError(error)) {
-          throw error;
-        }
-        try {
-          snapshot = await getDocsFromCache(collection(db, "products"));
-        } catch (cacheError) {
-          console.warn("Could not check the Firestore product cache:", cacheError);
-        }
-      }
+    try {
+      snapshot = await getDocsFromCache(collection(db, "products"));
+    } catch (cacheError) {
+      console.warn("Could not check the Firestore product cache:", cacheError);
     }
     const otherProducts = snapshot
       ? snapshot.docs.filter((entry) => entry.id !== excludeId)
@@ -74,45 +54,6 @@ function Inventory() {
   reason: "",
   costAmount: "",
 });
-
-const getCurrentUserInfo = async () => {
-  const currentUser = auth.currentUser;
-
-  if (!currentUser) {
-    throw new Error("User is not logged in.");
-  }
-
-  let userSnapshot;
-  let networkUnavailable = false;
-  try {
-    userSnapshot = typeof navigator !== "undefined" && !navigator.onLine
-      ? await getDocFromCache(doc(db, "users", currentUser.uid))
-      : await getDoc(doc(db, "users", currentUser.uid));
-  } catch (error) {
-    if (!isNetworkError(error)) {
-      throw error;
-    }
-    networkUnavailable = true;
-  }
-
-  if (userSnapshot?.exists()) {
-    const userData = userSnapshot.data();
-    return {
-      userId: currentUser.uid,
-      email: userData.email || currentUser.email,
-      role: userData.role || "unknown",
-    };
-  }
-
-  if ((typeof navigator !== "undefined" && !navigator.onLine) || networkUnavailable) {
-    return {
-      userId: currentUser.uid,
-      email: currentUser.email,
-      role: "unknown",
-    };
-  }
-  throw new Error("User information was not found.");
-};
 
 const [openMenuId, setOpenMenuId] = useState(null);
 
@@ -153,9 +94,10 @@ const [deleting, setDeleting] = useState(false);
   // Load products
   const loadProducts = async () => {
     try {
-      const querySnapshot = await getDocs(
-        collection(db, "products")
-      );
+      const querySnapshot =
+        typeof navigator !== "undefined" && !navigator.onLine
+          ? await getDocsFromCache(collection(db, "products"))
+          : await getDocs(collection(db, "products"));
 
       const productList = querySnapshot.docs.map((doc) => ({
         id: doc.id,
@@ -331,9 +273,22 @@ const handleEditProduct = async (e) => {
 
         createdAt: serverTimestamp(),
     });
-    await stockBatch.commit();
-
     await batch.commit();
+    setProducts((current) => current.map((product) =>
+      product.id === editingProduct.id
+        ? {
+            ...product,
+            productId: formData.productId.trim(),
+            productName: formData.productName.trim(),
+            description: formData.description.trim(),
+            productCost,
+            trackStock: formData.trackStock,
+            sellingPrice,
+            minimumStock,
+            maximumStock,
+          }
+        : product
+    ));
     alert("Product updated successfully.");
 
     setShowEditForm(false);
@@ -352,8 +307,6 @@ const handleEditProduct = async (e) => {
       maximumStock: "",
     });
 
-    await loadProducts();
-
   } catch (error) {
     console.error("Error updating product:", error);
     alert("Failed to update product.");
@@ -371,7 +324,6 @@ const openDeleteForm = (product) => {
 };
 const handleDeleteProduct = async (e) => {
   e.preventDefault();
-  const userInfo = await getCurrentUserInfo();
 
   if (!deletingProduct) {
     return;
@@ -384,9 +336,11 @@ const handleDeleteProduct = async (e) => {
 
   try {
     setDeleting(true);
+    const userInfo = await getCurrentUserInfo();
+    const deleteBatch = writeBatch(db);
 
     // Record deletion before deleting the product
-    await addDoc(collection(db, "productActivity"), {
+    deleteBatch.set(doc(collection(db, "productActivity")), {
       action: "delete",
       productId: deletingProduct.productId,
       productName: deletingProduct.productName,
@@ -400,17 +354,17 @@ const handleDeleteProduct = async (e) => {
     });
 
     // Delete product
-    await deleteDoc(
-      doc(db, "products", deletingProduct.id)
+    deleteBatch.delete(doc(db, "products", deletingProduct.id));
+    await deleteBatch.commit();
+    setProducts((current) =>
+      current.filter((product) => product.id !== deletingProduct.id)
     );
 
-    alert("Product deleted successfully.");
+    alert("Product deletion saved on this device. It will sync to Firestore when online.");
 
     setShowDeleteForm(false);
     setDeletingProduct(null);
     setDeleteReason("");
-
-    await loadProducts();
 
   } catch (error) {
     console.error("Error deleting product:", error);
@@ -627,6 +581,19 @@ const handleStockUpdate = async (e) => {
         createdAt: serverTimestamp(),
       }
     );
+    await stockBatch.commit();
+
+    setProducts((current) => current.map((product) =>
+      product.id === selectedProduct.id
+        ? {
+            ...product,
+            stock: newStock,
+            productCost: newCost,
+            costPerItem: newCostPerItem,
+            profitPerItem: newProfitPerItem,
+          }
+        : product
+    ));
 
     // ==========================================
     // SUCCESS
@@ -634,13 +601,11 @@ const handleStockUpdate = async (e) => {
 
     alert(
       stockAction === "add"
-        ? "Stock added successfully."
-        : "Stock removed successfully."
+        ? "Stock saved on this device. It will sync to Firestore when online."
+        : "Stock removal saved on this device. It will sync to Firestore when online."
     );
 
     closeStockForm();
-
-    await loadProducts();
 
   } catch (error) {
     console.error(
@@ -733,35 +698,29 @@ const handleSubmit = async (e) => {
     const duplicate = await checkDuplicateProduct(productId, formData.productName);
     if (duplicate) { alert(duplicate); return; }
     const batch = writeBatch(db);
-
-    // Add product
-    batch.set(doc(collection(db, "products")), {
+    const productRef = doc(collection(db, "products"));
+    const newProductData = {
       productId,
-
       productName: formData.productName.trim(),
-
       description: formData.description.trim(),
-
-      // Total cost of the current inventory
       productCost,
-
-      // Cost of one item
       costPerItem: Number(costPerItem.toFixed(2)),
-
-      // Selling price per item
       sellingPrice,
-
-      // Profit per item
       profitPerItem: Number(profitPerItem.toFixed(2)),
-
-      // Current stock
       trackStock: formData.trackStock,
       stock: initialStock,
-
       minimumStock,
-
       maximumStock,
+    };
+    const newProduct = {
+      ...newProductData,
+      id: productRef.id,
+      createdAt: new Date(),
+    };
 
+    // Add product
+    batch.set(productRef, {
+      ...newProductData,
       createdAt: serverTimestamp(),
     });
 
@@ -785,7 +744,8 @@ const handleSubmit = async (e) => {
     });
 
     await batch.commit();
-    alert("Product added successfully.");
+    setProducts((current) => [newProduct, ...current]);
+    alert("Product saved on this device. It will sync to Firestore when online.");
 
     // Reset form
     setFormData({
@@ -801,8 +761,6 @@ const handleSubmit = async (e) => {
     });
 
     setShowForm(false);
-
-    await loadProducts();
   } catch (error) {
     console.error("Error adding product:", error);
     alert("Failed to add product.");

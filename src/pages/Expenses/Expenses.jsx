@@ -1,16 +1,23 @@
 import { useEffect, useState } from "react";
 import {
   collection,
-  addDoc,
   getDocs,
-  getDoc,
+  getDocsFromCache,
   doc,
-  deleteDoc,
-  serverTimestamp,
+  writeBatch,
 } from "firebase/firestore";
 
-import { auth, db } from "../../firebase/config";
+import { db } from "../../firebase/config";
+import { getCurrentUserInfo } from "../../services/authService";
 import "./expenses.css";
+
+const toDate = (timestamp) => {
+  if (typeof timestamp?.toDate === "function") {
+    return timestamp.toDate();
+  }
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
 
 function Expenses() {
   // =========================
@@ -44,42 +51,21 @@ const [deletingExpenseLoading, setDeletingExpenseLoading] =
   useState(false);
 
   // =========================
-  // GET CURRENT USER INFO
-  // =========================
-  const getCurrentUserInfo = async () => {
-    const currentUser = auth.currentUser;
-
-    if (!currentUser) {
-      throw new Error("User is not logged in.");
-    }
-
-    const userSnapshot = await getDoc(
-      doc(db, "users", currentUser.uid)
-    );
-
-    if (!userSnapshot.exists()) {
-      throw new Error("User information was not found.");
-    }
-
-    const userData = userSnapshot.data();
-
-    return {
-      userId: currentUser.uid,
-      email: userData.email || currentUser.email,
-      role: userData.role || "unknown",
-    };
-  };
-
-  // =========================
   // LOAD EXPENSES
   // =========================
   const loadExpenses = async () => {
     try {
       setLoadingExpenses(true);
 
-      const querySnapshot = await getDocs(
-        collection(db, "expenses")
-      );
+      let querySnapshot;
+      try {
+        querySnapshot = typeof navigator !== "undefined" && !navigator.onLine
+          ? await getDocsFromCache(collection(db, "expenses"))
+          : await getDocs(collection(db, "expenses"));
+      } catch (error) {
+        console.error("Error loading expenses from Firestore:", error);
+        querySnapshot = await getDocsFromCache(collection(db, "expenses"));
+      }
 
       const expenseList = [];
 
@@ -92,13 +78,8 @@ const [deletingExpenseLoading, setDeletingExpenseLoading] =
 
       // Newest expense first
       expenseList.sort((a, b) => {
-        const dateA = a.createdAt?.toDate
-          ? a.createdAt.toDate()
-          : new Date(0);
-
-        const dateB = b.createdAt?.toDate
-          ? b.createdAt.toDate()
-          : new Date(0);
+        const dateA = toDate(a.createdAt) || new Date(0);
+        const dateB = toDate(b.createdAt) || new Date(0);
 
         return dateB - dateA;
       });
@@ -115,11 +96,8 @@ const [deletingExpenseLoading, setDeletingExpenseLoading] =
   };
 
   const filteredExpenses = expenses.filter((expense) => {
-  if (!expense.createdAt?.toDate) {
-    return false;
-  }
-
-  const expenseDate = expense.createdAt.toDate();
+    const expenseDate = toDate(expense.createdAt);
+    if (!expenseDate) return false;
 
   // Date From
   if (dateFrom) {
@@ -160,9 +138,10 @@ const handleDeleteExpense = async (expense) => {
 
     // Get the user who is deleting the expense
     const userInfo = await getCurrentUserInfo();
+    const deleteBatch = writeBatch(db);
 
     // Record the deletion activity
-    await addDoc(collection(db, "expenseActivity"), {
+    deleteBatch.set(doc(collection(db, "expenseActivity")), {
       action: "delete",
 
       expenseId: expense.id,
@@ -174,20 +153,19 @@ const handleDeleteExpense = async (expense) => {
       email: userInfo.email,
       role: userInfo.role,
 
-      createdAt: serverTimestamp(),
+      createdAt: new Date(),
     });
 
     // Delete the expense record
-    await deleteDoc(
-      doc(db, "expenses", expense.id)
+    deleteBatch.delete(doc(db, "expenses", expense.id));
+    await deleteBatch.commit();
+    setExpenses((current) =>
+      current.filter((entry) => entry.id !== expense.id)
     );
 
-    alert("Expense deleted successfully.");
+    alert("Expense deletion saved on this device. It will sync to Firestore when online.");
 
     setDeletingExpense(null);
-
-    // Refresh expense list
-    await loadExpenses();
 
   } catch (error) {
     console.error(
@@ -244,8 +222,8 @@ const handleDeleteExpense = async (expense) => {
       // Get logged-in user's information
       const userInfo = await getCurrentUserInfo();
 
-      // Save expense
-      await addDoc(collection(db, "expenses"), {
+      const expenseRef = doc(collection(db, "expenses"));
+      const expenseData = {
         expenseName: expenseName.trim(),
         description: expenseDescription.trim(),
         amount: amount,
@@ -256,10 +234,15 @@ const handleDeleteExpense = async (expense) => {
         role: userInfo.role,
 
         // Date and time
-        createdAt: serverTimestamp(),
-      });
+        createdAt: new Date(),
+      };
+      const savedExpense = { id: expenseRef.id, ...expenseData };
+      const expenseBatch = writeBatch(db);
+      expenseBatch.set(expenseRef, expenseData);
+      await expenseBatch.commit();
+      setExpenses((current) => [savedExpense, ...current]);
 
-      alert("Expense added successfully.");
+      alert("Expense saved on this device. It will sync to Firestore when online.");
 
       // Clear form
       setExpenseName("");
@@ -269,8 +252,6 @@ const handleDeleteExpense = async (expense) => {
       // Close form
       setShowExpenseForm(false);
 
-      // Refresh expense list
-      await loadExpenses();
     } catch (error) {
       console.error(
         "Error adding expense:",
@@ -290,11 +271,12 @@ const handleDeleteExpense = async (expense) => {
   // FORMAT DATE
   // =========================
   const formatDate = (timestamp) => {
-    if (!timestamp?.toDate) {
+    const date = toDate(timestamp);
+    if (!date) {
       return "Date unavailable";
     }
 
-    return timestamp.toDate().toLocaleString("en-PH", {
+    return date.toLocaleString("en-PH", {
       year: "numeric",
       month: "long",
       day: "numeric",

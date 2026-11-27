@@ -6,15 +6,14 @@ import {
   getDocsFromCache,
   serverTimestamp,
   doc,
-  getDoc,
-  getDocFromCache,
   writeBatch,
   runTransaction,
 } from "firebase/firestore";
 
-import { auth, db } from "../../firebase/config";
+import { db } from "../../firebase/config";
 import "./BarcodeScanner.css";
 import { useCart } from "../../context/CartContext";
+import { getCurrentUserInfo } from "../../services/authService";
 
 function BarcodeScanner() {
   // =========================
@@ -168,58 +167,6 @@ const handlePaymentConfirmation = () => {
 
 const openQuantityModal = (item) => { const product = products.find( (product) => String(product.productId).trim().toLowerCase() === String(item.productId).trim().toLowerCase() ); if (!product) { alert("Product information could not be found."); return; } const currentStock = Number(product.stock) || 0; setQuantityModal({ productId: item.productId, productName: item.productName, currentStock, trackStock: product.trackStock !== false, }); setQuantityValue(String(item.quantity)); }; const closeQuantityModal = () => { setQuantityModal(null); setQuantityValue(""); }; const handleSetQuantity = () => { if (!quantityModal) { return; } const quantity = Number(quantityValue); const currentStock = Number(quantityModal.currentStock) || 0; if (!quantityValue || !Number.isInteger(quantity)) { alert("Please enter a whole number."); return; } if (quantity < 1) { alert("Quantity must be at least 1."); return; } if (quantityModal.trackStock && currentStock <= 0) { alert("This product is currently out of stock."); return; } if (quantityModal.trackStock && quantity > currentStock) { alert( `You cannot set the quantity to ${quantity}. Only ${currentStock} item(s) are currently in stock.` ); return; } setQuantity( quantityModal.productId, quantity ); closeQuantityModal(); setMessage( `Quantity updated to ${quantity}.` ); setMessageType("success"); };
 
-  // =========================
-  // GET CURRENT USER INFO
-  // =========================
-
-  const getCurrentUserInfo = async () => {
-    const currentUser = auth.currentUser;
-
-    if (!currentUser) {
-      throw new Error("User is not logged in.");
-    }
-
-    let userSnapshot;
-    let networkUnavailable = false;
-    try {
-      userSnapshot = typeof navigator !== "undefined" && !navigator.onLine
-        ? await getDocFromCache(doc(db, "users", currentUser.uid))
-        : await getDoc(doc(db, "users", currentUser.uid));
-    } catch (error) {
-      if (error?.code !== "unavailable" &&
-          error?.code !== "deadline-exceeded" &&
-          !(typeof navigator !== "undefined" && !navigator.onLine)) {
-        throw error;
-      }
-      networkUnavailable = true;
-    }
-
-    if (userSnapshot?.exists()) {
-      const userData = userSnapshot.data();
-      return {
-        userId: currentUser.uid,
-        email: userData.email || currentUser.email,
-        role: userData.role || "unknown",
-      };
-    }
-
-    if (typeof navigator !== "undefined" && !navigator.onLine) {
-      return {
-        userId: currentUser.uid,
-        email: currentUser.email,
-        role: "unknown",
-      };
-    }
-    if (!userSnapshot && networkUnavailable) {
-      return {
-        userId: currentUser.uid,
-        email: currentUser.email,
-        role: "unknown",
-      };
-    }
-    throw new Error("User information was not found.");
-  };
-
   const completeOfflineSale = async (userInfo, finalGcashAmount, finalCashAmount, paymentMethod, changeAmount) => {
     const batch = writeBatch(db);
     const productDetails = cart.map((item) => {
@@ -365,6 +312,13 @@ const openQuantityModal = (item) => { const product = products.find( (product) =
       gcashAmount: finalGcashAmount,
       change: changeAmount,
       paymentMethod,
+      updatedProducts: productDetails.map((product) => ({
+        id: product.product.id,
+        stock: product.newStock,
+        productCost: product.newProductCost,
+        costPerItem: Number(product.newCostPerItem.toFixed(2)),
+        profitPerItem: Number(product.newProfitPerItem.toFixed(2)),
+      })),
     };
   };
 
@@ -1027,6 +981,13 @@ const completeSaleWithPayment = async ({
           change:
             changeAmount,
           paymentMethod,
+          updatedProducts: productReferences.map((product) => ({
+            id: product.ref.id,
+            stock: product.newStock,
+            productCost: product.newProductCost,
+            costPerItem: Number(product.newCostPerItem.toFixed(2)),
+            profitPerItem: Number(product.newProfitPerItem.toFixed(2)),
+          })),
         };
           }
         );
@@ -1091,7 +1052,12 @@ const completeSaleWithPayment = async ({
 
     setMessage(successMessage);
     setMessageType("success");
-    await loadProducts();
+    setProducts((current) => current.map((product) => {
+      const updatedProduct = saleReference.updatedProducts?.find(
+        (entry) => entry.id === product.id
+      );
+      return updatedProduct ? { ...product, ...updatedProduct } : product;
+    }));
 
     // ==========================================
     // CONSOLE LOGS
@@ -1162,9 +1128,9 @@ const completeSaleWithPayment = async ({
     try {
       setLoadingProducts(true);
 
-      const snapshot = await getDocs(
-        collection(db, "products")
-      );
+      const snapshot = typeof navigator !== "undefined" && !navigator.onLine
+        ? await getDocsFromCache(collection(db, "products"))
+        : await getDocs(collection(db, "products"));
 
       const productList = snapshot.docs.map(
         (productDoc) => ({

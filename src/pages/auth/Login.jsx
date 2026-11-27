@@ -1,71 +1,119 @@
-import { useState } from "react";
-import { signInWithEmailAndPassword } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
-import { auth, db } from "../../firebase/config";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  browserLocalPersistence,
+  onAuthStateChanged,
+  setPersistence,
+  signInWithEmailAndPassword,
+} from "firebase/auth";
+import { auth } from "../../firebase/config";
 import { useNavigate } from "react-router-dom";
+import { getUserRole } from "../../services/authService";
 import "../../styles/login.css";
 
 function Login() {
   const navigate = useNavigate();
+  const loginInProgress = useRef(false);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [checkingSession, setCheckingSession] = useState(true);
+
+  const navigateForRole = useCallback((role) => {
+    if (role === "admin") {
+      navigate("/dashboard", { replace: true });
+    } else if (role === "staff") {
+      navigate("/inventory", { replace: true });
+    } else {
+      setError("Invalid user role.");
+    }
+  }, [navigate]);
+
+  useEffect(() => {
+    let active = true;
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (!active) return;
+      if (!user) {
+        setCheckingSession(false);
+        return;
+      }
+      if (loginInProgress.current) {
+        setCheckingSession(false);
+        return;
+      }
+
+      setCheckingSession(true);
+      setError("");
+      try {
+        const role = await getUserRole(user);
+        if (active) {
+          navigateForRole(role);
+        }
+      } catch (sessionError) {
+        console.error("Could not restore saved login:", sessionError);
+        if (active) {
+          setError(sessionError.message || "Unable to restore your saved login.");
+        }
+      } finally {
+        if (active) {
+          setCheckingSession(false);
+        }
+      }
+    });
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [navigateForRole]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
 
     setError("");
     setLoading(true);
+    loginInProgress.current = true;
 
     try {
-      // Login using Firebase Authentication
+      await setPersistence(auth, browserLocalPersistence);
       const userCredential = await signInWithEmailAndPassword(
         auth,
         email,
         password
       );
 
-      const user = userCredential.user;
-
-      // Get user's role from Firestore
-      const userDoc = await getDoc(
-        doc(db, "users", user.uid)
-      );
-
-      if (!userDoc.exists()) {
-        setError("User account information was not found.");
-        setLoading(false);
-        return;
+      const role = await getUserRole(userCredential.user);
+      navigateForRole(role);
+    } catch (loginError) {
+      console.error("Login failed:", loginError);
+      if (loginError?.code === "auth/network-request-failed") {
+        setError(
+          "Connect to the internet to sign in for the first time. Previously saved sessions can be used offline."
+        );
+      } else if (
+        loginError?.message === "User account information was not found." ||
+        loginError?.message?.includes("offline")
+      ) {
+        setError(loginError.message);
+      } else {
+        setError("Invalid email or password.");
       }
-
-      const userData = userDoc.data();
-      const role = userData.role;
-
-      // ADMIN
-      if (role === "admin") {
-        navigate("/dashboard");
-        return;
-      }
-
-      // STAFF
-      if (role === "staff") {
-        navigate("/inventory");
-        return;
-      }
-
-      // Invalid role
-      setError("Invalid user role.");
-
-    } catch (error) {
-      console.error(error);
-
-      setError("Invalid email or password.");
+    } finally {
+      loginInProgress.current = false;
+      setLoading(false);
     }
-
-    setLoading(false);
   };
+
+  if (checkingSession) {
+    return (
+      <div className="login-container">
+        <div className="login-box">
+          <p>Checking saved login...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="login-container">
