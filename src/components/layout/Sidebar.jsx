@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { NavLink, useNavigate, useLocation } from "react-router-dom";
 import { signOut } from "firebase/auth";
 import { auth } from "../../firebase/config";
-import { Store, LayoutDashboard, Activity, Package, ScanBarcode, ReceiptText, Wallet, UserRound, LogOut, Menu, X } from "lucide-react";
+import { LayoutDashboard, Activity, Package, ScanBarcode, ReceiptText, Wallet, UserRound, LogOut, Menu, X } from "lucide-react";
+import logo from "../../assets/images/logo.png";
 
 const overview = [
   { to: "/dashboard", label: "Dashboard", Icon: LayoutDashboard },
@@ -59,7 +60,7 @@ function Sidebar({ role }) {
   return (
     <>
       <header className="restopos-mobile-header">
-        <div className="restopos-mobile-brand"><Store size={22} aria-hidden="true" /> RestoPos</div>
+        <div className="restopos-mobile-brand"><img className="restopos-mobile-logo" src={logo} alt="CHILL logo" /> RestoPos</div>
         <button type="button" className="restopos-menu-toggle" aria-label={isOpen ? "Close navigation" : "Open navigation"} aria-expanded={isOpen} aria-controls="restopos-sidebar" onClick={() => setIsOpen(!isOpen)}>
           {isOpen ? <X size={23} /> : <Menu size={23} />}
         </button>
@@ -67,7 +68,7 @@ function Sidebar({ role }) {
       {isOpen && <div className="restopos-sidebar-backdrop" onClick={() => setIsOpen(false)} aria-hidden="true" />}
       <aside id="restopos-sidebar" className={`sidebar${isOpen ? " sidebar-open" : ""}`}>
         <div className="sidebar-header">
-          <div className="restopos-brand-icon"><Store size={24} aria-hidden="true" /></div>
+          <div className="restopos-brand-icon"><img className="restopos-brand-logo" src={logo} alt="CHILL logo" /></div>
           <div className="restopos-brand-text"><h2>RestoPos</h2><p>Management System</p></div>
           <button type="button" className="restopos-drawer-close" aria-label="Close navigation" onClick={() => setIsOpen(false)}><X size={20} /></button>
         </div>

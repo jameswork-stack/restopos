@@ -29,6 +29,14 @@ body {
   margin-bottom: 25px;
 }
 
+.login-box .login-logo {
+  display: block;
+  width: 140px;
+  height: auto;
+  margin: 0 auto 16px;
+  object-fit: contain;
+}
+
 .input-group {
   margin-bottom: 18px;
 }
@@ -71,8 +79,4 @@ body {
   color: #dc2626;
   margin-bottom: 15px;
   font-size: 14px;
-}
-img {
-  width: 350px;
-  height: 150px;
 }

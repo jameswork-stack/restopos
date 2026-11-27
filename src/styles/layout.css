@@ -13,7 +13,8 @@ body { margin: 0; font-family: Arial, sans-serif; color: #0f172a; background: #f
   background: #0f172a; color: #fff; border-right: 1px solid #1e293b;
 }
 .sidebar .sidebar-header { display: flex; align-items: center; gap: 12px; padding: 24px 18px; border-bottom: 1px solid #263449; flex-shrink: 0; }
-.restopos-brand-icon { width: 42px; height: 42px; flex-shrink: 0; display: grid; place-items: center; background: #2563eb; border-radius: 12px; color: white; }
+.restopos-brand-icon { width: 42px; height: 42px; flex-shrink: 0; overflow: hidden; border-radius: 12px; background: #0f172a; }
+.restopos-brand-logo { display: block; width: 42px; height: 42px; object-fit: cover; }
 .restopos-brand-text { min-width: 0; }
 .sidebar .sidebar-header h2 { margin: 0; color: #fff; font-size: 22px; font-weight: 700; letter-spacing: -.6px; }
 .restopos-brand-text p { margin: 4px 0 0; color: #94a3b8; font-size: 11px; }
@@ -48,7 +49,7 @@ body { margin: 0; font-family: Arial, sans-serif; color: #0f172a; background: #f
 @media (max-width: 768px) {
   .restopos-mobile-header { position: fixed; inset: 0 0 auto; height: var(--restopos-mobile-height); display: flex; align-items: center; justify-content: space-between; padding: 0 16px; background: #0f172a; color: white; z-index: 1000; border-bottom: 1px solid #334155; }
   .restopos-mobile-brand { display: flex; gap: 10px; align-items: center; font-size: 19px; font-weight: 700; }
-  .restopos-mobile-brand svg { color: #93c5fd; }
+  .restopos-mobile-logo { display: block; width: 32px; height: 32px; border-radius: 50%; object-fit: cover; }
   .restopos-menu-toggle, .restopos-drawer-close { display: grid; place-items: center; width: 40px; height: 40px; border: 0; border-radius: 8px; background: #1e293b; color: #fff; cursor: pointer; flex-shrink: 0; }
   .restopos-drawer-close { margin-left: auto; width: 30px; height: 34px; }
   .app-layout .sidebar { width: min(280px, calc(100vw - 32px)); transform: translateX(-100%); visibility: hidden; transition: transform .24s ease, visibility .24s; z-index: 1002; }

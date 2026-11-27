@@ -9,6 +9,7 @@ import { auth } from "../../firebase/config";
 import { useNavigate } from "react-router-dom";
 import { getUserRole } from "../../services/authService";
 import "../../styles/login.css";
+import logo from "../../assets/images/logo.png";
 
 function Login() {
   const navigate = useNavigate();
@@ -120,6 +121,7 @@ function Login() {
 
       <div className="login-box">
 
+        <img className="login-logo" src={logo} alt="CHILL logo" />
         <h1>Login</h1>
 
         <form onSubmit={handleLogin}>
